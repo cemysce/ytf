@@ -1,11 +1,11 @@
 # `ytf`: YouTube Follow
 
-This is a tool for reporting new videos on YouTube channels/playlists you're
-interested in.
+This is a tool for "following" YouTube channels/playlists without actually
+creating an account, signing in, reporting your interests to Google, or opening
+YouTube and risking getting distracted by other videos.
 
-Benefits:
-* no need to sign into YouTube and report to Google which channels you're following
-* no need to consume your time by manually checking YouTube, and risking getting distracted by other videos
+Every time you run it, it will generate a report of videos newer than the ones
+it knew about the previous time it ran.
 
 ## Installation
 
@@ -46,15 +46,17 @@ and some additional metadata:
       * A playlist ID URL only makes sense if its maintainer is adding new
         videos to the start of the list, not the end of the list.  Otherwise,
         `ytf`'s known-video logic will not work correctly.
-      * When using a playlist ID URL, last known upload date (see below) won't
-        work so don't bother setting it.
   * the only **required** field
-* last known video ID, last known upload date
-  * if either or both specified, will be used to limit results in report
-    * On its own, last known upload date becomes unreliable over time due to how `yt-dlp` approximates video upload dates (`ytf` may work around this in the future).
-  * if both missing, report will contain entire list of videos
-  * last known video ID will be updated automatically after each run
-  * last known upload date will be updated automatically after each run, if URL was not a playlist ID
+* known video ID(s)
+  * comma-separated list
+  * if specified, will be used to limit results in report
+  * if missing, report will contain entire list of videos
+  * will be populated/updated automatically after each run
+  * if writing config file for initial run and you want to specify this, it
+    should be sufficient to specify just the most recent video's ID
+  * `yt-dlp` supports limiting query to only videos uploaded after a specified
+    date, but this feature has a few critical flaws preventing it from being
+    used here.  See comments in code for details.
 
 There is also an optional `verbose` property at the top-level, which if enabled
 will cause `ytf` to run `yt-dlp` in verbose mode.  This is useful for debugging
@@ -71,20 +73,17 @@ Example:
         {
             "name": "NASA Jet Propulsion Laboratory",
             "videos_url": "https://www.youtube.com/c/NASAJPL/videos",
-            "last_known_id": "UOdbwQE-0z4",
-            "last_known_upload_date": "20221027"
+            "known_ids": "UOdbwQE-0z4"
         },
         {
             "name": "Computerphile",
             "videos_url": "https://www.youtube.com/user/Computerphile/videos",
-            "last_known_id": "2iF9PRriA7w",
-            "last_known_upload_date": "20221025"
+            "known_ids": "2iF9PRriA7w"
         },
         {
             "name": "Numberphile",
             "videos_url": "https://www.youtube.com/user/numberphile/videos",
-            "last_known_id": "nQR1NY03zIA",
-            "last_known_upload_date": "20221026"
+            "known_ids": "nQR1NY03zIA"
         }
     ]
 }
@@ -118,8 +117,8 @@ On each run, `ytf` will get the list of videos from each channel/playlist URL
 you've specified in the configuration file, skip over known videos (if the
 configuration file includes the necessary information), then generate an HTML
 report of the rest of the videos (i.e. the "new" ones).  It will also update
-the configuration file to record what it last saw for each channel/playlist, so
-that on subsequent runs only newer videos will be reported.
+the configuration file to record what it saw for each channel/playlist, so that
+on subsequent runs only newer videos will be reported.
 
 The report file name will contain a timestamp (so that multiple runs will just
 write new files without replacing old ones) and the number of items in the
