@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+
+# Copyright (c) 2022, cemysce
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# YouTube Follow
+
+import datetime
+import html
+import json
+import os
+import subprocess
+import sys
+
+assert sys.version_info >= (3, 8)
+
+def read_config(filename):
+    with open(filename) as f:
+        return json.load(f)
+
+def write_config(filename, config):
+    with open(filename, 'x') as f:
+        json.dump(config,
+                  f,
+                  ensure_ascii=False, # don't escape Unicode chars, leave them as-is
+                  indent=4)
+
+def from_yyyymmdd(s):
+    return datetime.datetime.strptime(s, '%Y%m%d').date()
+
+def to_yyyymmdd(d):
+    return d.strftime('%Y%m%d')
+
+def utc_to_timestamp_sfx(dt_utc):
+    assert dt_utc.tzinfo == datetime.timezone.utc
+    return dt_utc.strftime("%Y%m%d%H%M%S")
+
+def gen_channel_report(channel, verbose=False):
+    if channel.get('last_known_upload_date', None) is not None:
+        # Date passed to --dateafter is 1 day earlier than last_known_upload_date, to account for videos that may have
+        #  been released later on same day as last_known_id.  We'll then look for last_known_id in the returned list to
+        #  skip past it.
+        #FIXME actually should be even earlier, to account for the approximate date used in calculations.  maybe 1 month?  or more?
+        #FIXME alternatively, since yt-dlp is fetching the whole list anyway, maybe just keep a set of all known IDs and forget about the date.
+        #       instead of checking each playlist item to see if equal to last_known_id, check each playlist item to see if in known_ids set.
+        date_after_args = ['--dateafter', to_yyyymmdd(  from_yyyymmdd(channel['last_known_upload_date'])
+                                                      - datetime.timedelta(1))]
+    else:
+        # No last_known_upload_date available, so query won't be bounded by date.
+        date_after_args = []
+    last_known_id = channel.get('last_known_id', None)
+    if verbose:
+        verbose_args = ['--verbose']
+    else:
+        verbose_args = []
+    channel_name = channel.get('name', None)
+    if channel_name is None:
+        channel_videos_list_desc = f'videos list at {channel["videos_url"]}'
+    else:
+        channel_videos_list_desc = f'"{channel_name}" videos list'
+    print(f'Downloading {channel_videos_list_desc}... (large channels may take a few minutes)', file=sys.stderr)
+    playlist = json.loads(subprocess.run(['yt-dlp', '--ignore-config']
+                                         +          verbose_args
+                                         +         ['--flat-playlist',
+                                                        # not documented very well, but it seems this will internally
+                                                        #  download only playlist pages, not each video's page, which
+                                                        #  should be faster but will also limit what metadata is
+                                                        #  available per video
+                                                    '--extractor-args', 'youtubetab:approximate_date']
+                                                        # when in flat playlist mode, put approximate date (calculated
+                                                        #  from playlist page) into upload_date field
+                                         +          date_after_args
+                                         +         ['--dump-single-json',
+                                                        # dump video data to stdout in JSON, but unlike --dump-json,
+                                                        #  this will output single JSON structure for entire retrieved
+                                                        #  subset of playlist, including metadata about playlist itself
+                                                    '--',
+                                                    channel['videos_url']],
+                                         stdout=subprocess.PIPE, # capture only stdout, let stderr go to console
+                                         check=True,
+                                         text=True).stdout)
+    print('Download complete, constructing channel report...', file=sys.stderr)
+    if channel_name is None:
+        channel['name'] = playlist['title']
+    channel_report_html = []
+    num_items_in_channel_report = 0
+    if len(playlist['entries']) > 0:
+        last_known_id_found = False
+        videos_html_newest_to_oldest = []
+        for video in playlist['entries']:
+            if video['id'] == last_known_id:
+                last_known_id_found = True
+                break
+            # Embedding HTML below was taken from right-clicking a video on YouTube, selecting "Copy embed code",
+            #  tweaking the size, and replacing static data with variables:
+            videos_html_newest_to_oldest.append('    <p><iframe width="480"\n'
+                                                '               height="360"\n'
+                                               f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
+                                               f'               title="{video["title"]}"\n'
+                                                '               frameborder="0"\n'
+                                                '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
+                                                '               allowfullscreen></iframe></p>')
+        if len(videos_html_newest_to_oldest) > 0 or (last_known_id is not None and not last_known_id_found):
+            channel_report_html += [f'<h2><a href="{playlist["channel_url"]}">{html.escape(playlist["channel"])}</a></h2>',
+                                     '    <div style="text-indent: 50px;">',
+                                    f'    <a href="{playlist["webpage_url"]}">New Videos</a> (older to newer):']
+            if last_known_id is not None and not last_known_id_found:
+                channel_report_html.append(f'    <p><b>WARNING:</b> Last known video ID <a href="https://www.youtube.com/watch?v={last_known_id}">{last_known_id}</a>\n'
+                                            '                       was not found, so one or more videos may be missing in list below!</p>')
+                num_items_in_channel_report += 1
+            channel_report_html += reversed(videos_html_newest_to_oldest)
+            num_items_in_channel_report += len(videos_html_newest_to_oldest)
+            channel_report_html.append('    </div>')
+        newest_video = playlist['entries'][0]
+        channel['last_known_id'] = newest_video['id']
+        newest_video_upload_date = newest_video.get('upload_date', None)
+        if newest_video_upload_date is not None:
+            channel['last_known_upload_date'] = newest_video_upload_date
+    print('Channel report constructed.', file=sys.stderr)
+    return (channel_report_html, num_items_in_channel_report)
+
+def write_report(report_file_base_name,
+                 report_html_chunks,
+                 report_start_timestamp,
+                 num_items_in_report):
+    def num_items_to_sfx(n):
+        if n == 0:
+            return 'no-items'
+        if n == 1:
+            return '1-item'
+        return f'{n}-items'
+    with open(f'{report_file_base_name}.{num_items_to_sfx(num_items_in_report)}.html', 'x') as f:
+        print('Writing report...', file=sys.stderr)
+        print('<html>\n'
+             f'<head><title>YouTube Follow Report @ {report_start_timestamp.strftime("%c (%Z)")}</title></head>\n'
+              '<body>',
+              file=f)
+        if len(report_html_chunks) > 0:
+            for html in report_html_chunks:
+                print(html, file=f)
+        else:
+            print('No new videos.', file=f)
+        print('</body>\n'
+              '</html>',
+              file=f)
+        print('Report written.', file=sys.stderr)
+
+def main():
+    # init
+    start_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
+    CONFIG_FILE_NAME = 'ytf-config.json'
+    REPORT_FILE_BASE_NAME = f'new-videos.{utc_to_timestamp_sfx(start_timestamp_utc)}'
+    REPORT_CONFIG_BACKUP_FILE_NAME = f'{REPORT_FILE_BASE_NAME}.{CONFIG_FILE_NAME}.bak'
+    config = read_config(CONFIG_FILE_NAME)
+    verbose = config.get('verbose', False)
+    report_html_chunks = []
+    num_items_in_report = 0
+
+    # gather info and construct report
+    for channel in config['channels']:
+        (channel_report, num_items_in_channel_report) = gen_channel_report(channel, verbose)
+        report_html_chunks += channel_report
+        num_items_in_report += num_items_in_channel_report
+
+    # determine if new config will be written
+    #  (it's possible state/config was updated even if report yielded no items, but it's not worth reworking code to
+    #   check for precisely that condition b/c whatever data got updated would be updated again next time this runs)
+    should_write_new_config = num_items_in_report > 0
+
+    # backup initial state/config, but only if original state/config will be overwritten
+    if should_write_new_config:
+        os.rename(CONFIG_FILE_NAME, REPORT_CONFIG_BACKUP_FILE_NAME)
+
+    # write report
+    write_report(REPORT_FILE_BASE_NAME,
+                 report_html_chunks,
+                 start_timestamp_utc,
+                 num_items_in_report)
+
+    # write updated state/config, if we're supposed to
+    if should_write_new_config:
+        write_config(CONFIG_FILE_NAME, config)
+
+if __name__ == '__main__':
+    sys.exit(main() or 0)
