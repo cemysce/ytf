@@ -112,7 +112,7 @@ only the videos released since the previous run.
 
 ## Running
 
-`ytf` takes no arguments, it's controlled entirely by its [configuration file](#configuration).
+`ytf` takes no arguments, it's controlled entirely by [configuration file](#configuration).
 
 On each run, `ytf` will get the list of videos from each channel/playlist URL
 you've specified in the configuration file, skip over known videos (if the
