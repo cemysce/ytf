@@ -32,7 +32,7 @@ USAGE = '''ytf - YouTube Follow
 Usage: {program} [generate|view]
 
   generate  Generates/regenerates report HTML file of new videos on followed
-             channels (logs to log file).
+             playlists (logs to log file).
 
   view      Opens report HTML file in default web browser (logs to console).
 
@@ -675,13 +675,14 @@ def load_config(config_file):
     config = json.load(config_file)
     duplicate_urls = {playlist_url
                       for playlist_url, count
-                       in collections.Counter(channel['playlist_url']
-                                              for channel
-                                               in config['channels']).items()
+                       in collections.Counter(
+                                  playlist_info['url']
+                                  for playlist_info
+                                   in config['playlist_infos']).items()
                        if count > 1}
     if len(duplicate_urls) > 0:
-        raise RuntimeError('Duplicate `playlist_url` values found in config'
-                          f' file "{os.path.basename(config_file.name)}":'
+        raise RuntimeError('Duplicate `url` values found in config file'
+                          f' "{os.path.basename(config_file.name)}":'
                           f' {", ".join(duplicate_urls)}')
     return config
 
@@ -706,12 +707,12 @@ def load_state(state_file, report_file_exists):
         slot = 'post-report'
     known_ids_map = {}
     duplicate_urls = set()
-    for channel_state in state[slot]:
-        if channel_state['playlist_url'] in known_ids_map:
-            duplicate_urls.add(channel_state['playlist_url'])
+    for playlist_state in state[slot]:
+        if playlist_state['playlist_url'] in known_ids_map:
+            duplicate_urls.add(playlist_state['playlist_url'])
         else:
-            known_ids_map[channel_state['playlist_url']] \
-                    = set(channel_state['known_ids'].split(','))
+            known_ids_map[playlist_state['playlist_url']] \
+                    = set(playlist_state['known_ids'].split(','))
     if len(duplicate_urls) > 0:
         raise RuntimeError('Duplicate `playlist_url` values found under'
                           f' "{slot}" in state file'
@@ -738,17 +739,16 @@ def write_state(state_file,
               ensure_ascii=False, # don't escape Unicode chars, leave them as-is
               indent=4)
 
-def gen_channel_report(already_known_ids, # input/output param
-                       playlist_url,
-                       channel_playlist_name=None):
-    logger = logging.getLogger('gen_channel_report')
-    if channel_playlist_name is None:
-        channel_playlist_name_text = ''
+def gen_playlist_report(already_known_ids, # input/output param
+                        playlist_url,
+                        playlist_name=None):
+    logger = logging.getLogger('gen_playlist_report')
+    if playlist_name is None:
+        playlist_name_text = ''
     else:
-        channel_playlist_name_text = f' ("{channel_playlist_name}")'
-    logger.info('Downloading playlist at'
-               f' {playlist_url}{channel_playlist_name_text}'
-                ' (may take several minutes if many videos):')
+        playlist_name_text = f' ("{playlist_name}")'
+    logger.info(f'Downloading playlist at {playlist_url}{playlist_name_text}'
+                 ' (may take several minutes if many videos):')
     with PausedLogFile(logger) as lfn:
         with open(lfn, 'r+', encoding='UTF-8') as lf:
             lf.seek(0, io.SEEK_END)
@@ -767,22 +767,27 @@ def gen_channel_report(already_known_ids, # input/output param
                                                             playlist_url],
                                                             # yt-dlp supports querying for only videos uploaded after a
                                                             #  specified date, but this feature has a few critical flaws
-                                                            #  preventing it from being used here.  It cannot get exact upload
-                                                            #  dates for videos when using --flat-playlist, it can only give
-                                                            #  approximate upload dates, and only if you also pass:
+                                                            #  preventing it from being used here.  For channels' or users'
+                                                            #  "/videos", "/streams", or "/shorts" pages, it cannot get exact
+                                                            #  upload dates for videos when using --flat-playlist, it can only
+                                                            #  give approximate upload dates, and only if you also pass:
                                                             #       --extractor-args youtubetab:approximate_date
                                                             #  The approximations are calculated from text like "1 day ago",
                                                             #  "3 months ago", "2 years ago", etc.  As you can see the
                                                             #  precision drops dramatically as the video gets older.  For
-                                                            #  playlist ID URLs it can't get upload dates at all, not even
-                                                            #  approximate ones.  Even when dealing with channels that are
-                                                            #  updated recently and frequently, there is instability in the
-                                                            #  upload date reported by yt-dlp, leading to unreliable reporting
-                                                            # YouTube and channel maintainers can also remove or hide videos,
-                                                            #  and later restore them, and this can also subvert the
-                                                            #  expectations of this script.  This also happens sometimes with
-                                                            #  channels which contain YouTube Shorts; yt-dlp will inexplicably
-                                                            #  list them on some runs and skip them on other runs.
+                                                            #  playlist ID URLs (i.e. https://.../playlist?list=...) it can't
+                                                            #  get upload dates at all, not even approximate ones.  Even when
+                                                            #  dealing with channels/users that update frequently and have
+                                                            #  done so recently, there is some instability in the upload date
+                                                            #  reported by yt-dlp, leading to unreliable reporting.
+                                                            # Playlist maintainers (and YouTube itself) can also remove or
+                                                            #  hide videos, and later restore them, and this can also subvert
+                                                            #  the expectations of this script.  yt-dlp may also unexpectedly
+                                                            #  be missing certain videos in its output, listing them sometimes
+                                                            #  but inexplicably omitting them other times -- for example this
+                                                            #  happened when YouTube was transitioning from having all content
+                                                            #  (videos, live streams, and shorts) listed together on the
+                                                            #  "/videos" page to having them on separate pages.
                                                             # So the most reliable technique is in fact to not filter with
                                                             #  yt-dlp but instead record the full list of IDs it returns, and
                                                             #  on every subsequent run merge any new IDs into that list but
@@ -791,11 +796,11 @@ def gen_channel_report(already_known_ids, # input/output param
                                                  stderr=lf, # stderr goes to log file
                                                  check=True,
                                                  encoding='UTF-8').stdout)
-    logger.info('Download complete, constructing channel report...')
-    if channel_playlist_name is None:
-        channel_playlist_name = playlist['title']
-    channel_report_html = []
-    num_items_in_channel_report = 0
+    logger.info('Download complete, constructing playlist report...')
+    if playlist_name is None:
+        playlist_name = playlist['title']
+    playlist_report_html = []
+    num_items_in_playlist_report = 0
     if len(playlist['entries']) > 0:
         known_id_found = False
         videos_html_newest_to_oldest = []
@@ -817,20 +822,18 @@ def gen_channel_report(already_known_ids, # input/output param
             # NOTE: We use CSS `padding-left` below instead of `text-indent`
             #        because the latter only indents the first contained line
             #        and we want to indent all the lines together.
-            channel_report_html += [f'<h2><a href="{playlist["webpage_url"]}">{html.escape(channel_playlist_name)}</a></h2>',
-                                     '    <div style="padding-left: 50px;">',
-                                     '    New videos, older to newer:']
+            playlist_report_html += [f'<h2><a href="{playlist["webpage_url"]}">{html.escape(playlist_name)}</a></h2>',
+                                      '    <div style="padding-left: 50px;">',
+                                      '    New videos, older to newer:']
             if len(already_known_ids) > 0 and not known_id_found:
-                channel_report_html.append('    <p><b>WARNING:</b> No previously known video IDs were found during this run, so one or more videos may be missing in list below!</p>')
-                num_items_in_channel_report += 1
-            channel_report_html += reversed(videos_html_newest_to_oldest)
-            num_items_in_channel_report += len(videos_html_newest_to_oldest)
-            channel_report_html.append('    </div>')
+                playlist_report_html.append('    <p><b>WARNING:</b> No previously known video IDs were found during this run, so one or more videos may be missing in list below!</p>')
+                num_items_in_playlist_report += 1
+            playlist_report_html += reversed(videos_html_newest_to_oldest)
+            num_items_in_playlist_report += len(videos_html_newest_to_oldest)
+            playlist_report_html.append('    </div>')
         already_known_ids |= set(video['id'] for video in playlist['entries'])
-    logger.info('Channel report constructed.')
-    return (channel_report_html,
-            channel_playlist_name,
-            num_items_in_channel_report)
+    logger.info('Playlist report constructed.')
+    return playlist_report_html, playlist_name, num_items_in_playlist_report
 
 def write_report(report_file,
                  report_html_chunks,
@@ -932,18 +935,18 @@ def main__generate_report():
                 # gather info and construct report
                 known_ids_map_before_report = copy.deepcopy(known_ids_map)
                 report_html_chunks = []
-                for channel in config['channels']:
-                    playlist_url = channel['playlist_url']
+                for playlist_info in config['playlist_infos']:
+                    playlist_url = playlist_info['url']
                     known_ids = known_ids_map.setdefault(playlist_url, set())
                     num_known_ids_before_report = len(known_ids)
-                    channel_playlist_name_in_config = channel.get('name', None)
-                    (channel_report, channel_playlist_name, _) = \
-                            gen_channel_report(known_ids,
-                                               playlist_url,
-                                               channel_playlist_name_in_config)
-                    report_html_chunks += channel_report
-                    if channel_playlist_name_in_config is None:
-                        channel['name'] = channel_playlist_name
+                    playlist_name_in_config = playlist_info.get('name', None)
+                    (playlist_report, playlist_name, _) = \
+                            gen_playlist_report(known_ids,
+                                                playlist_url,
+                                                playlist_name_in_config)
+                    report_html_chunks += playlist_report
+                    if playlist_name_in_config is None:
+                        playlist_info['name'] = playlist_name
                         config_modified = True
                     if num_known_ids_before_report != len(known_ids):
                         state_modified = True
@@ -954,7 +957,7 @@ def main__generate_report():
                              program_start_timestamp_utc)
                 # If write_report or closing of report file's `with` block
                 #  fails for any reason, exception is raised before we write
-                #  report, so we also skip logic below of updating channel
+                #  report, so we also skip logic below of updating playlist
                 #  names in config file (no big deal) and writing updated state
                 #  file, which means none of the files get written and it's as
                 #  if program just never ran, which is the transactional
@@ -977,7 +980,7 @@ def main__generate_report():
             write_config(config_write_proxy_file, config)
             # If write_config or closing of config file's `with` block fails
             #  for any reason, it's not a big deal because new config (which
-            #  failed to write) just contained some names of channels that had
+            #  failed to write) just contained some names of playlists that had
             #  names unset in original config (not a big deal).
 
         # write state, if it's been modified
