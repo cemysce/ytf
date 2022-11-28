@@ -8,176 +8,1012 @@
 
 # YouTube Follow
 
+import abc
+import collections
+import copy
 import datetime
 import html
+import inspect
+import io
 import json
+import logging
 import os
+import pathlib
+import platform
 import subprocess
 import sys
+import time
+import webbrowser
 
 assert sys.version_info >= (3, 8)
 
-def read_config(filename):
-    with open(filename) as f:
-        return json.load(f)
+USAGE = '''ytf - YouTube Follow
 
-def write_config(filename, config):
-    with open(filename, 'x') as f:
-        json.dump(config,
-                  f,
-                  ensure_ascii=False, # don't escape Unicode chars, leave them as-is
-                  indent=4)
+Usage: {program} [generate|view]
 
-def utc_to_timestamp_sfx(dt_utc):
-    assert dt_utc.tzinfo == datetime.timezone.utc
-    return dt_utc.strftime("%Y%m%d%H%M%S")
+  generate  Generates/regenerates report HTML file of new videos on followed
+             channels (logs to log file).
 
-def gen_channel_report(channel, verbose=False):
-    if verbose:
-        verbose_args = ['--verbose']
+  view      Opens report HTML file in default web browser (logs to console).
+
+Both modes lock report file to prevent concurrent use by other {program} instances.
+'''
+
+LOG_FILE_NAME    = 'ytf.log'
+CONFIG_FILE_NAME = 'ytf-config.json'
+STATE_FILE_NAME  = 'ytf-state.json'
+REPORT_FILE_NAME = 'new-videos.html'
+
+class PausedLogFile:
+    def __init__(self, logger=None):
+        self.__logger = logger if logger else logging.getLogger()
+        self.__fh_props = None
+        self.__fh_removed = False
+    @classmethod
+    def __get_logger_with_filehandler(cls, logger):
+        fhs = [h for h in logger.handlers
+               if isinstance(h, logging.FileHandler)]
+        if len(fhs) == 0:
+            if logger.propagate and logger.parent:
+                logger_with_fh, fh = cls.__get_logger_with_filehandler(logger.parent)
+                if fh:
+                    return logger_with_fh, fh
+            return logger, None
+        if len(fhs) > 1:
+            raise RuntimeError(f'Logger "{logger.name}" has >1 FileHandler ({len(fhs)}).')
+        assert len(fhs) == 1
+        return logger, fhs[0]
+    def __enter__(self):
+        self.__logger, fh = self.__get_logger_with_filehandler(self.__logger)
+        if not fh:
+            return None
+        self.__fh_props = {'level':     fh.level,
+                           'formatter': fh.formatter,
+                           'fullpath':  fh.baseFilename,
+                           'encoding':  fh.encoding,
+                           'errors':    fh.errors}
+        self.__logger.removeHandler(fh)
+        self.__fh_removed = True
+        fh.close()
+        return self.__fh_props['fullpath']
+    def __exit__(self, *exc_details):
+        if self.__fh_removed:
+            fh = logging.FileHandler(self.__fh_props['fullpath'],
+                                     mode='a',
+                                     encoding=self.__fh_props['encoding'],
+                                     errors=self.__fh_props['errors'])
+            fh.setLevel(self.__fh_props['level'])
+            fh.setFormatter(self.__fh_props['formatter'])
+            self.__logger = logging.getLogger()
+            self.__logger.addHandler(fh)
+        return False
+
+class LoggerMixin:
+    def __init__(self, instance_identifying_text=None):
+        self.__instance_identifying_text = instance_identifying_text
+    def _logger(self):
+        current_subclass_name = self.__class__.__name__
+        current_frame = inspect.currentframe()
+        calling_frame = None
+        prefix_str = None
+        try:
+            calling_frame = current_frame.f_back
+            calling_class_name = calling_frame.f_locals['self'].__class__.__name__
+            assert current_subclass_name == calling_class_name
+            calling_function_name = calling_frame.f_code.co_name
+            instance_prefix = (f'{{{self.__instance_identifying_text}}}'
+                               if self.__instance_identifying_text else
+                               '')
+            return logging.getLogger(f'{calling_class_name}{instance_prefix}'
+                                     f'.{calling_function_name}')
+        except:
+            pass
+        finally:
+            # prevent keeping references to frame objects, since that can cause
+            #  program to create reference cycles (see `inspect` module's
+            #  documentation)
+            del calling_frame
+            del current_frame
+
+## GENERIC SAFE FILE-HANDLING UTILITY FUNCTIONS: ##############################
+
+# Python Standard Library's `os.rename` won't clobber on Windows.
+def __get_rename_noreplace_for_Windows():
+    logger = logging.getLogger('get_rename_noreplace_for_Windows')
+    logger.info('Initializing no-replace rename for Windows.')
+    # nothing to initialize...
+    logger.info('No-replace rename implemented as: os.rename')
+    return os.rename
+
+# Linux's system call `renameat2(..., RENAME_NOREPLACE)` won't clobber and is
+#  atomic.
+def __get_rename_noreplace_for_Linux():
+    logger = logging.getLogger('get_rename_noreplace_for_Linux')
+    logger.info('Initializing no-replace rename for Linux.')
+    import ctypes
+    import ctypes.util
+    import errno
+    libc_name = ctypes.util.find_library('c')
+    if libc_name is None:
+        raise RuntimeError('Linux libc not found.')
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    if not hasattr(libc, 'renameat2'):
+        raise RuntimeError(f'Linux libc "{libc_name}" is missing'
+                            ' renameat2() system call.')
+    AT_FDCWD = -100
+    RENAME_NOREPLACE = 1
+    def renameat2_noreplace_closure(src, dest):
+        rc = libc.renameat2(AT_FDCWD, src.encode('UTF-8'),
+                            AT_FDCWD, dest.encode('UTF-8'),
+                            RENAME_NOREPLACE)
+        if rc == 0:
+            return
+        if rc == -1:
+            _errno = ctypes.get_errno()
+            # Raising `OSError` seems to actually raise the appropriate
+            #  exception type according to the passed-in `errno`.  Of concern
+            #  to us is `EEXIST`, for which it will raise `FileExistsError`.
+            raise OSError(_errno, os.strerror(_errno), src, None, dest)
+        raise RuntimeError(f'Unexpected rcode {rc} from renameat2() for'
+                           f' renaming "{src}" to "{dest}".')
+    logger.info('No-replace rename implemented as:'
+                ' Linux syscall renameat2(RENAME_NOREPLACE)')
+    return renameat2_noreplace_closure
+
+# macOS's system call `renamex_np(..., RENAME_EXCL)` won't clobber and is
+#  atomic.
+def __get_rename_noreplace_for_macOS():
+    logger = logging.getLogger('get_rename_noreplace_for_macOS')
+    logger.info('Initializing no-replace rename for macOS.')
+    import ctypes
+    import ctypes.util
+    import errno
+    libc_name = ctypes.util.find_library('c')
+    if libc_name is None:
+        raise RuntimeError('macOS libc not found.')
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    if not hasattr(libc, 'renamex_np'):
+        raise RuntimeError(f'macOS libc "{libc_name}" is missing'
+                            ' renamex_np() system call.')
+    RENAME_EXCL = 0x4
+    def renamex_np_noreplace_closure(src, dest):
+        rc = libc.renamex_np(src.encode('UTF-8'),
+                             dest.encode('UTF-8'),
+                             RENAME_EXCL)
+        if rc == 0:
+            return
+        if rc == -1:
+            _errno = ctypes.get_errno()
+            # Raising `OSError` seems to actually raise the appropriate
+            #  exception type according to the passed-in `errno`.  Of concern
+            #  to us is `EEXIST`, for which it will raise `FileExistsError`.
+            raise OSError(_errno, os.strerror(_errno), src, None, dest)
+        raise RuntimeError(f'Unexpected rcode {rc} from renamex_np() for'
+                           f' renaming "{src}" to "{dest}".')
+    logger.info('No-replace rename implemented as:'
+                ' macOS syscall renamex_np(RENAME_EXCL)')
+    return renamex_np_noreplace_closure
+
+# Creating a hard link with the destination name, then unlinking the old name,
+#  is mostly safe.  It won't clobber the destination; and it doesn't "rename"
+#  by actually making a copy, so won't consume extra diskspace and the file
+#  modtime will be preserved.  However, if unlinking the source file fails
+#  after linking the destination file succeeded, then you end up with an
+#  unwanted hard link, and attempting to clean up by unlinking the destination
+#  file is just another step that could potentially fail.
+def __get_rename_noreplace_fallback(exc=None):
+    logger = logging.getLogger('__get_rename_noreplace_fallback')
+    if exc:
+        logger.warning('Initializing fallback no-replace rename because failed'
+                      f' to initialize platform-specific one: {repr(exc)}')
     else:
-        verbose_args = []
-    channel_name = channel.get('name', None)
-    if channel_name is None:
-        channel_videos_list_desc = f'videos list at {channel["videos_url"]}'
+        logger.warning('Initializing fallback no-replace rename because there'
+                       ' is no platform-specific one for current platform.')
+    def link_unlink(src, dest):
+        os.link(src, dest)
+        os.unlink(src)
+    logger.info('No-replace rename implemented as: link+unlink')
+    return link_unlink
+
+try:
+    rename_noreplace = {
+        'Windows': __get_rename_noreplace_for_Windows,
+        'Linux':   __get_rename_noreplace_for_Linux,
+        'Darwin':  __get_rename_noreplace_for_macOS
+    }.get(platform.system(), __get_rename_noreplace_fallback)()
+except Exception as e:
+    rename_noreplace = __get_rename_noreplace_fallback(e)
+
+def try_rename_noreplace(src, dest):
+    try:
+        rename_noreplace(src, dest)
+        return True
+    except FileExistsError:
+        return False
+
+def rename_with_single_backup(src, dest):
+    '''
+    Rename dest to add ".bak" extension (clobbering any existing backup), then
+    rename src to dest.
+    '''
+    os.replace(dest, f'{dest}.bak')
+    rename_noreplace(src, dest)
+
+def rename_with_backup(src, dest):
+    '''Rename dest to add unique extension, then rename src to dest.'''
+    def utc_timestamp_sfx():
+        return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S')
+    # NOTE: Using PID in backup file's name is for informational purposes only,
+    #        to aid in debugging to figure out which current or past process
+    #        created a particular backup file.
+    pid = os.getpid()
+    while not try_rename_noreplace(dest,
+                                   f'{dest}.bak.{utc_timestamp_sfx()}.{pid}'):
+        pass
+    rename_noreplace(src, dest)
+
+## CONVENTIONAL SAFE FILE-HANDLING UTILITY FUNCTIONS: #########################
+## (only safe if all relevant parties follow same convention) #################
+
+class ClaimedFile(LoggerMixin):
+
+    def __init__(self, file_ctxmgr=None, *, lock_file_name=None):
+        if callable(getattr(file_ctxmgr, 'filename', None)):
+            self.__lock_file_name = f'{file_ctxmgr.filename()}.lck'
+        else:
+            if lock_file_name is None:
+                raise RuntimeError('Cannot determine lock file name because'
+                                   ' target file CM lacks a \'filename\''
+                                   ' attribute and lock file name was not'
+                                   ' specified.')
+            self.__lock_file_name = lock_file_name
+        LoggerMixin.__init__(self, f'"{self.__lock_file_name}"')
+        self.__lock_file_ctxmgr = None
+        self.__file_ctxmgr = file_ctxmgr
+        self.__pid = os.getpid()
+
+    def __enter__(self):
+        self._logger().debug('Opening lock file for exclusive creation and'
+                             ' writing.')
+        self.__lock_file_ctxmgr = open(self.__lock_file_name,
+                                       'x',
+                                       encoding='UTF-8')
+        self._logger().debug('Entering lock file CM.')
+        lock_file = self.__lock_file_ctxmgr.__enter__()
+        # NOTE: Writing PID is for informational purposes only.  It won't be
+        #        programatically verified by anything afterwards, and if all
+        #        parties that could potentially access a given file are using
+        #        this exact mechanism, it shouldn't be necessary to verify.
+        #        The PID is just there to aid in debugging to figure out which
+        #        current or past process created a particular lock file, for
+        #        instance if a program is long-running and still has a file
+        #        locked, or if a program crashes before removing a lock file.
+        print(f'Locked by PID {self.__pid}.', file=lock_file, flush=True)
+        if self.__file_ctxmgr is None:
+            return None
+        self._logger().debug('Entering target file CM.')
+        return self.__file_ctxmgr.__enter__()
+
+    def __exit__(self, *exc_details):
+        exception_was_raised = any(x is not None for x in exc_details)
+        exc = exc_details[1]
+        if exception_was_raised:
+            self._logger().debug(f'Exiting with exception: {repr(exc)}')
+        else:
+            self._logger().debug('Exiting normally.')
+
+        if self.__lock_file_ctxmgr:
+            # If lock file's context manager (first bit of state initialized in
+            #  __init__()) is set, that means we have some cleaning up to do.
+
+            suppress_exception = False
+
+            # First, clean up target file's context manager (reverse of
+            #  initialization order) if there was one (caller may have used
+            #  this class just to manage a lock file and not a target file).
+            if self.__file_ctxmgr is not None:
+                self._logger().debug('Exiting target file CM.')
+                if self.__file_ctxmgr.__exit__(*exc_details):
+                    self._logger().debug('Exiting target file CM suppressed'
+                                         ' exception.')
+                    suppress_exception = True
+                    exc_details = (None, None, None)
+                self.__file_ctxmgr = None
+
+            # Second, clean up lock file's context manager (reverse of
+            #  initialization order).
+            self._logger().debug('Exiting lock file CM.')
+            if self.__lock_file_ctxmgr.__exit__(*exc_details):
+                self._logger().debug('Exiting lock file CM suppressed'
+                                     ' exception.')
+                suppress_exception = True
+                exc_details = (None, None, None)
+            self.__lock_file_ctxmgr = None
+
+            # Finally, clean up lock file itself.
+            self._logger().debug('Deleting lock file.')
+            try:
+                os.remove(self.__lock_file_name)
+            except Exception as e:
+                self._logger().error(f'Failed to delete lock file: {repr(e)}')
+
+            if exception_was_raised:
+                action = 'suppress' if suppress_exception else 'allow'
+                self._logger().debug(f'Done, will {action} exception.')
+            else:
+                self._logger().debug('Done.')
+            return exception_was_raised and suppress_exception
+
+        # If lock file's context manager (first bit of state initialized in
+        #  __init__()) wasn't set, that means an exception was raised from
+        #  __init__(), or from __enter__() while lock file was being opened.
+        self._logger().debug('Done, will allow exception.')
+        assert exception_was_raised
+        return False
+
+class BaseWriteFile(abc.ABC, LoggerMixin):
+
+    @staticmethod
+    def __valid_filename(filename):
+        if len(filename) == 0:
+            raise ValueError('filename cannot be blank')
+        if os.path.basename(filename) == '':
+            raise ValueError('filename cannot refer to a directory (end with'
+                            f' {filename[-1]}): "{filename}"')
+        return filename
+
+    def __init__(self,
+                 filename,
+                 *,
+                 binary=False,
+             # params passed through to `open()` for target/proxy file(s):
+                 buffering=-1,
+                 encoding=None,
+                 errors=None,
+                 newline=None):
+        LoggerMixin.__init__(self, f'"{filename}"')
+        self._filename = self.__valid_filename(filename)
+        self._binary_mode = 'b' if binary else ''
+        self._open_kwargs = {'buffering': buffering,
+                             'encoding':  encoding,
+                             'errors':    errors,
+                             'newline':   newline}
+
+    def filename(self):
+        return self._filename
+
+    @abc.abstractmethod
+    def __enter__(self):
+        pass
+
+    @abc.abstractmethod
+    def __exit__(self, *exc_details):
+        pass
+
+class WriteInPlaceFile(BaseWriteFile):
+
+    def __init__(self,
+                 filename,
+                 *,
+                 must_already_exist=False,
+                 overwrite=False,
+                 **open_kwargs):
+        super().__init__(filename, **open_kwargs)
+        self.__must_already_exist = must_already_exist
+        self.__overwrite = overwrite
+        self.__file_ctxmgr = None
+
+    def __enter__(self):
+        try:
+            # Attempt to open target file in read+write mode.
+            # NOTE: You could use the lower level `os.open()` in order to make
+            #        use of lower level file modes like `os.O_RDWR|os.O_TRUNC`,
+            #        but then the returned object would be a file descriptor,
+            #        not a context manager.  So instead you use `open()` below
+            #        with 'r+' for read+write mode (since that's the only
+            #        write-capable mode you can pass to `open()` that will
+            #        require the file to exist) and manually handle the
+            #        resetting of position and truncation yourself.
+            self._logger().debug('Opening target file for reading and'
+                                 ' writing.')
+            self.__file_ctxmgr = open(self._filename,
+                                      f'r+{self._binary_mode}',
+                                      **self._open_kwargs)
+            self._logger().debug('Entering target file CM.')
+            file = self.__file_ctxmgr.__enter__()
+            if self.__overwrite:
+                self._logger().debug('Truncating existing target file to 0'
+                                     ' bytes.')
+                file.truncate()
+            if self.__must_already_exist:
+                # If caller required target file to already exist (and it did,
+                #  b/c otherwise FileNotFoundError would've been raised), then
+                #  there's no point in returning bool of whether target file
+                #  already existed b/c it'll always be true, so return just the
+                #  target file object.
+                return file
+            return file, True # True: target file already existed
+        except FileNotFoundError:
+            if self.__must_already_exist:
+                # If caller required target file to already exist (and it
+                #  didn't, b/c FileNotFoundError was raised), then re-raise
+                #  exception.
+                raise
+            # Target file didn't already exist, so create it anew and open that
+            #  instead.
+            self._logger().debug('Target file didn\'t exist, so instead'
+                                 ' opening it for exclusive creation and'
+                                 ' writing.')
+            self.__file_ctxmgr = open(self._filename,
+                                      f'x{self._binary_mode}',
+                                      **self._open_kwargs)
+            self._logger().debug('Entering target file CM.')
+            return (self.__file_ctxmgr.__enter__(),
+                    False) # False: target file didn't already exist
+
+    def __exit__(self, *exc_details):
+        exception_was_raised = any(x is not None for x in exc_details)
+        exc = exc_details[1]
+        if exception_was_raised:
+            self._logger().debug(f'Exiting with exception: {repr(exc)}')
+        else:
+            self._logger().debug('Exiting normally.')
+
+        if self.__file_ctxmgr:
+            # If target file's context manager (first bit of state initialized
+            #  in __init__()) is set, that means we have some cleaning up to
+            #  do.
+
+            suppress_exception = False
+
+            # Clean up target file's context manager.
+            self._logger().debug('Exiting target file CM.')
+            if self.__file_ctxmgr.__exit__(*exc_details):
+                self._logger().debug('Exiting target file CM suppressed'
+                                     ' exception.')
+                suppress_exception = True
+                exc_details = (None, None, None)
+            self.__file_ctxmgr = None
+
+            if exception_was_raised:
+                action = 'suppress' if suppress_exception else 'allow'
+                self._logger().debug(f'Done, will {action} exception.')
+            else:
+                self._logger().debug('Done.')
+            return exception_was_raised and suppress_exception
+
+        # If target file's context manager (first bit of state initialized in
+        #  __init__()) wasn't set, that means an exception was raised from
+        #  __init__(), or from __enter__() while target file was being opened.
+        self._logger().debug('Done, will allow exception.')
+        assert exception_was_raised
+        return False
+
+class AbortProxyWrite(Exception):
+    def __init__(self, delete_write_proxy_file=True):
+        self.__delete_write_proxy_file = delete_write_proxy_file
+    def should_delete_write_proxy_file(self):
+        return self.__delete_write_proxy_file
+
+class WriteProxiedFile(BaseWriteFile):
+
+    @staticmethod
+    def __valid_num_backups(num_backups):
+        VALID_NUM_BACKUPS_VALUES = (0, 1, float('inf'))
+        if num_backups not in VALID_NUM_BACKUPS_VALUES:
+            raise ValueError('num_backups must be one of:'
+                            f' {", ".join(VALID_NUM_BACKUPS_VALUES)}')
+        return num_backups
+
+    def __init__(self,
+                 filename,
+                 *,
+                 must_already_exist=False,
+                 num_backups=0, # supports 0, 1, and inf (i.e. `float('inf')` or `math.inf`)
+                 delete_write_proxy_file_on_failure=True,
+                 **open_kwargs):
+        super().__init__(filename, **open_kwargs)
+        self.__must_already_exist = must_already_exist
+        self.__num_backups = self.__valid_num_backups(num_backups)
+        self.__delete_write_proxy_file_on_failure = delete_write_proxy_file_on_failure
+        self.__write_proxy_file_ctxmgr = None
+        self.__file_ctxmgr = None
+
+    def __enter__(self):
+        # Open write-proxy file in exclusive-create mode.
+        self._logger().debug('Opening write-proxy file for exclusive creation'
+                             ' and writing.')
+        self.__write_proxy_file_ctxmgr = open(f'{self._filename}.tmp',
+                                              f'x{self._binary_mode}',
+                                              **self._open_kwargs)
+        try:
+            # Attempt to open target file in read-only mode.
+            self._logger().debug('Opening target file for reading.')
+            self.__file_ctxmgr = open(f'{self._filename}',
+                                      f'r{self._binary_mode}',
+                                      **self._open_kwargs)
+            self._logger().debug('Entering target file CM and write-proxy file'
+                                 ' CM.')
+            return (self.__file_ctxmgr.__enter__(),
+                    self.__write_proxy_file_ctxmgr.__enter__())
+        except FileNotFoundError:
+            if self.__must_already_exist:
+                # Caller required target file to already exist, so re-raise the
+                #  FileNotFoundError.
+                raise
+            # Caller didn't require target file to already exist, so just leave
+            #  its context manager as None, and return None instead of the
+            #  opened target file object.
+            self._logger().debug('Target file didn\'t exist.')
+            self.__file_ctxmgr = None
+            self._logger().debug('Entering write-proxy file CM.')
+            return None, self.__write_proxy_file_ctxmgr.__enter__()
+
+    def __exit__(self, *exc_details):
+        exception_was_raised = any(x is not None for x in exc_details)
+        exc = exc_details[1]
+        if exception_was_raised:
+            self._logger().debug(f'Exiting with exception: {repr(exc)}')
+        else:
+            self._logger().debug('Exiting normally.')
+
+        if self.__write_proxy_file_ctxmgr:
+            # If write-proxy file's context manager (first bit of state
+            #  initialized in __init__()) is set, that means we have some
+            #  cleaning up to do.
+
+            suppress_exception = False
+
+            # First, clean up target file's context manager (reverse of
+            #  initialization order).
+            if self.__file_ctxmgr:
+                # If target file's context manager is set, clean it up.
+                file_already_existed = True
+                self._logger().debug('Exiting target file CM.')
+                if self.__file_ctxmgr.__exit__(*exc_details):
+                    self._logger().debug('Exiting target file CM suppressed'
+                                         ' exception.')
+                    suppress_exception = True
+                    exc_details = (None, None, None)
+                self.__file_ctxmgr = None
+            else:
+                # If target file's context manager wasn't set, and given the
+                #  other conditions above, that means either an exception was
+                #  raised from __enter__() while target file was being opened,
+                #  or target file didn't already exist.
+                if not exception_was_raised:
+                    # If no exception was raised, and given the other
+                    #  conditions above, then target file must not have already
+                    #  existed, and therefore also caller must not have
+                    #  required it to already exist.
+                    file_already_existed = False
+                    assert not self.__must_already_exist
+                # NOTE: If exception_was_raised, we deliberately don't declare
+                #        file_already_existed because we don't know whether the
+                #        target file already existed, but that's fine because
+                #        we don't check file_already_existed below if
+                #        exception_was_raised.
+
+            # Second, clean up write-proxy file's context manager (reverse of
+            #  initialization order).
+            self._logger().debug('Exiting write-proxy file CM.')
+            if self.__write_proxy_file_ctxmgr.__exit__(*exc_details):
+                self._logger().debug('Exiting write-proxy file CM suppressed'
+                                     ' exception.')
+                suppress_exception = True
+                exc_details = (None, None, None)
+            self.__write_proxy_file_ctxmgr = None
+
+            # Finally, reconcile write-proxy file with target file.
+            if exception_was_raised:
+                # Something went wrong (exception was raised), or caller just
+                #  decided to abort creating/replacing target file
+                #  (AbortProxyWrite was raised).  Discard write-proxy file
+                #  unless instructed otherwise.
+                if isinstance(exc, AbortProxyWrite):
+                    suppress_exception = True
+                    delete_write_proxy_file = exc.should_delete_write_proxy_file()
+                else:
+                    delete_write_proxy_file = self.__delete_write_proxy_file_on_failure
+                if delete_write_proxy_file:
+                    self._logger().debug('Deleting write-proxy file.')
+                    try:
+                        os.remove(f'{self._filename}.tmp')
+                    except Exception as e:
+                        self._logger().error('Failed to delete write-proxy'
+                                            f' file: {repr(e)}')
+            else:
+                # Writes completed successfully, so follow through on whatever
+                #  strategy was requested.
+                if file_already_existed:
+                    # If target file already existed, then we should either:
+                    #  * rename target file to a backup name, then rename
+                    #     write-proxy file to target file (and expect to not be
+                    #     replacing an existing target file)
+                    #  * replace target file with write-proxy file
+                    self._logger().debug('Replacing target file with'
+                                         ' write-proxy file, keeping'
+                                        f' {self.__num_backups} backup(s).')
+                    if self.__num_backups == float('inf'):
+                        rename_with_backup(f'{self._filename}.tmp',
+                                           self._filename)
+                    elif self.__num_backups == 1:
+                        rename_with_single_backup(f'{self._filename}.tmp',
+                                                  self._filename)
+                    else:
+                        assert self.__num_backups == 0
+                        os.replace(f'{self._filename}.tmp', self._filename)
+                        # NOTE: `os.replace()` will clobber dest (if necessary)
+                        #        on all platforms, whereas `os.rename()` only
+                        #        does so on POSIX platforms.
+                else:
+                    # If target file didn't already exist, then we should
+                    #  rename write-proxy file to target file (and expect to
+                    #  not be replacing an existing target file).
+                    self._logger().debug('Renaming write-proxy file to target'
+                                         ' file.')
+                    rename_noreplace(f'{self._filename}.tmp', self._filename)
+
+            if exception_was_raised:
+                action = 'suppress' if suppress_exception else 'allow'
+                self._logger().debug(f'Done, will {action} exception.')
+            else:
+                self._logger().debug('Done.')
+            return exception_was_raised and suppress_exception
+
+        # If write-proxy file's context manager (first bit of state initialized
+        #  in __init__()) wasn't set, that means an exception was raised from
+        #  __init__(), or from __enter__() while write-proxy file was being
+        #  opened.
+        self._logger().debug('Done, will allow exception.')
+        assert exception_was_raised
+        return False
+
+###############################################################################
+
+def load_config(config_file):
+    config = json.load(config_file)
+    duplicate_urls = {playlist_url
+                      for playlist_url, count
+                       in collections.Counter(channel['playlist_url']
+                                              for channel
+                                               in config['channels']).items()
+                       if count > 1}
+    if len(duplicate_urls) > 0:
+        raise RuntimeError('Duplicate `playlist_url` values found in config'
+                          f' file "{os.path.basename(config_file.name)}":'
+                          f' {", ".join(duplicate_urls)}')
+    return config
+
+def load_state(state_file, report_file_exists):
+    state = ({'pre-report': [], 'post-report': []} if state_file is None
+             else json.load(state_file))
+    if report_file_exists:
+        # A report file already exists, so we need to replace it with a fresh
+        #  one that includes everything in it, plus anything new since.  To do
+        #  that, we need to use the state as it was before that report was
+        #  generated.
+        slot = 'pre-report'
     else:
-        channel_videos_list_desc = f'"{channel_name}" videos list'
-    print(f'Downloading {channel_videos_list_desc}... (large channels may take a few minutes)', file=sys.stderr)
-    playlist = json.loads(subprocess.run(['yt-dlp', '--ignore-config']
-                                         +          verbose_args
-                                         +         ['--flat-playlist',
-                                                        # not documented very well, but it seems this will internally
-                                                        #  download only playlist pages, not each video's page, which
-                                                        #  should be faster but will also limit what metadata is
-                                                        #  available per video
-                                                    '--dump-single-json',
-                                                        # dump video data to stdout in JSON, but unlike --dump-json,
-                                                        #  this will output single JSON structure for entire retrieved
-                                                        #  subset of playlist, including metadata about playlist itself
-                                                    '--',
-                                                    channel['videos_url']],
-                                                    # yt-dlp supports querying for only videos uploaded after a
-                                                    #  specified date, but this feature has a few critical flaws
-                                                    #  preventing it from being used here.  It cannot get exact upload
-                                                    #  dates for videos when using --flat-playlist, it can only give
-                                                    #  approximate upload dates, and only if you also pass:
-                                                    #       --extractor-args youtubetab:approximate_date
-                                                    #  The approximations are calculated from text like "1 day ago",
-                                                    #  "3 months ago", "2 years ago", etc.  As you can see the
-                                                    #  precision drops dramatically as the video gets older.  For
-                                                    #  playlist ID URLs it can't get upload dates at all, not even
-                                                    #  approximate ones.  Even when dealing with channels that are
-                                                    #  updated recently and frequently, there is instability in the
-                                                    #  upload date reported by yt-dlp, leading to unreliable reporting
-                                                    # YouTube and channel maintainers can also remove or hide videos,
-                                                    #  and later restore them, and this can also subvert the
-                                                    #  expectations of this script.  This also happens sometimes with
-                                                    #  channels which contain YouTube Shorts; yt-dlp will inexplicably
-                                                    #  list them on some runs and skip them on other runs.
-                                                    # So the most reliable technique is in fact to not filter with
-                                                    #  yt-dlp but instead record the full list of IDs it returns, and
-                                                    #  on every subsequent run merge any new IDs into that list but
-                                                    #  never remove any, which is what we do below.
-                                         stdout=subprocess.PIPE, # capture only stdout, let stderr go to console
-                                         check=True,
-                                         text=True).stdout)
-    print('Download complete, constructing channel report...', file=sys.stderr)
-    if channel_name is None:
-        channel['name'] = playlist['title']
+        # No report file exists, which normally means one of the following:
+        #   * The user already consumed and deleted it, so we need to create a
+        #      new one using the state as it was after that last report was
+        #      generated.
+        #   * This program is running for the first time in the current
+        #      directory, which means there was no state file either, so the
+        #      state object we have now is just the default, so it doesn't
+        #      really matter which slot we use because they're both empty.
+        slot = 'post-report'
+    known_ids_map = {}
+    duplicate_urls = set()
+    for channel_state in state[slot]:
+        if channel_state['playlist_url'] in known_ids_map:
+            duplicate_urls.add(channel_state['playlist_url'])
+        else:
+            known_ids_map[channel_state['playlist_url']] \
+                    = set(channel_state['known_ids'].split(','))
+    if len(duplicate_urls) > 0:
+        raise RuntimeError('Duplicate `playlist_url` values found under'
+                          f' "{slot}" in state file'
+                          f' "{os.path.basename(state_file.name)}":'
+                          f' {", ".join(duplicate_urls)}')
+    return known_ids_map
+
+def write_config(config_file, config):
+    json.dump(config,
+              config_file,
+              ensure_ascii=False, # don't escape Unicode chars, leave them as-is
+              indent=4)
+
+def write_state(state_file,
+                known_ids_map_before_report,
+                known_ids_map_after_report):
+    def gen_state_from_known_ids_map(known_ids_map):
+        return [{'playlist_url': playlist_url,
+                 'known_ids':    ','.join(known_ids)}
+                for playlist_url, known_ids in known_ids_map.items()]
+    json.dump({'pre-report':  gen_state_from_known_ids_map(known_ids_map_before_report),
+               'post-report': gen_state_from_known_ids_map(known_ids_map_after_report)},
+              state_file,
+              ensure_ascii=False, # don't escape Unicode chars, leave them as-is
+              indent=4)
+
+def gen_channel_report(already_known_ids, # input/output param
+                       playlist_url,
+                       channel_playlist_name=None):
+    logger = logging.getLogger('gen_channel_report')
+    if channel_playlist_name is None:
+        channel_playlist_name_text = ''
+    else:
+        channel_playlist_name_text = f' ("{channel_playlist_name}")'
+    logger.info('Downloading playlist at'
+               f' {playlist_url}{channel_playlist_name_text}'
+                ' (may take several minutes if many videos):')
+    with PausedLogFile(logger) as lfn:
+        with open(lfn, 'r+', encoding='UTF-8') as lf:
+            lf.seek(0, io.SEEK_END)
+            playlist = json.loads(subprocess.run(['yt-dlp', '--ignore-config',
+                                                            '--verbose',
+                                                            '--flat-playlist',
+                                                                # not documented very well, but it seems this will internally
+                                                                #  download only playlist pages, not each video's page, which
+                                                                #  should be faster but will also limit what metadata is
+                                                                #  available per video
+                                                            '--dump-single-json',
+                                                                # dump video data to stdout in JSON, but unlike --dump-json,
+                                                                #  this will output single JSON structure for entire retrieved
+                                                                #  subset of playlist, including metadata about playlist itself
+                                                            '--',
+                                                            playlist_url],
+                                                            # yt-dlp supports querying for only videos uploaded after a
+                                                            #  specified date, but this feature has a few critical flaws
+                                                            #  preventing it from being used here.  It cannot get exact upload
+                                                            #  dates for videos when using --flat-playlist, it can only give
+                                                            #  approximate upload dates, and only if you also pass:
+                                                            #       --extractor-args youtubetab:approximate_date
+                                                            #  The approximations are calculated from text like "1 day ago",
+                                                            #  "3 months ago", "2 years ago", etc.  As you can see the
+                                                            #  precision drops dramatically as the video gets older.  For
+                                                            #  playlist ID URLs it can't get upload dates at all, not even
+                                                            #  approximate ones.  Even when dealing with channels that are
+                                                            #  updated recently and frequently, there is instability in the
+                                                            #  upload date reported by yt-dlp, leading to unreliable reporting
+                                                            # YouTube and channel maintainers can also remove or hide videos,
+                                                            #  and later restore them, and this can also subvert the
+                                                            #  expectations of this script.  This also happens sometimes with
+                                                            #  channels which contain YouTube Shorts; yt-dlp will inexplicably
+                                                            #  list them on some runs and skip them on other runs.
+                                                            # So the most reliable technique is in fact to not filter with
+                                                            #  yt-dlp but instead record the full list of IDs it returns, and
+                                                            #  on every subsequent run merge any new IDs into that list but
+                                                            #  never remove any, which is what we do below.
+                                                 stdout=subprocess.PIPE, # stdout is captured
+                                                 stderr=lf, # stderr goes to log file
+                                                 check=True,
+                                                 encoding='UTF-8').stdout)
+    logger.info('Download complete, constructing channel report...')
+    if channel_playlist_name is None:
+        channel_playlist_name = playlist['title']
     channel_report_html = []
     num_items_in_channel_report = 0
     if len(playlist['entries']) > 0:
-        previously_known_ids = set(channel.get('known_ids', '').split(','))
         known_id_found = False
         videos_html_newest_to_oldest = []
         for video in playlist['entries']:
-            if video['id'] in previously_known_ids:
+            if video['id'] in already_known_ids:
                 known_id_found = True
                 break
             # Embedding HTML below was taken from right-clicking a video on YouTube, selecting "Copy embed code",
             #  tweaking the size, and replacing static data with variables:
-            videos_html_newest_to_oldest.append('    <p><iframe width="480"\n'
-                                                '               height="360"\n'
-                                               f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
-                                               f'               title="{video["title"]}"\n'
-                                                '               frameborder="0"\n'
-                                                '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
-                                                '               allowfullscreen></iframe></p>')
-        if len(videos_html_newest_to_oldest) > 0 or (len(previously_known_ids) > 0 and not known_id_found):
-            channel_report_html += [f'<h2><a href="{playlist["channel_url"]}">{html.escape(playlist["channel"])}</a></h2>',
-                                     '    <div style="text-indent: 50px;">',
-                                    f'    <a href="{playlist["webpage_url"]}">New Videos</a> (older to newer):']
-            if len(previously_known_ids) > 0 and not known_id_found:
-                channel_report_html.append(f'    <p><b>WARNING:</b> No previously known video IDs were found during this run, so one or more videos may be missing in list below!</p>')
+            videos_html_newest_to_oldest.append(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}">{html.escape(video["title"])}</a><br/>\n'
+                                                 '       <iframe width="480"\n'
+                                                 '               height="360"\n'
+                                                f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
+                                                f'               title="{video["title"]}"\n'
+                                                 '               frameborder="0"\n'
+                                                 '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
+                                                 '               allowfullscreen></iframe></p>')
+        if len(videos_html_newest_to_oldest) > 0 or (len(already_known_ids) > 0 and not known_id_found):
+            # NOTE: We use CSS `padding-left` below instead of `text-indent`
+            #        because the latter only indents the first contained line
+            #        and we want to indent all the lines together.
+            channel_report_html += [f'<h2><a href="{playlist["webpage_url"]}">{html.escape(channel_playlist_name)}</a></h2>',
+                                     '    <div style="padding-left: 50px;">',
+                                     '    New videos, older to newer:']
+            if len(already_known_ids) > 0 and not known_id_found:
+                channel_report_html.append('    <p><b>WARNING:</b> No previously known video IDs were found during this run, so one or more videos may be missing in list below!</p>')
                 num_items_in_channel_report += 1
             channel_report_html += reversed(videos_html_newest_to_oldest)
             num_items_in_channel_report += len(videos_html_newest_to_oldest)
             channel_report_html.append('    </div>')
-        channel['known_ids'] = ','.join(previously_known_ids | set(video['id'] for video in playlist['entries']))
-    print('Channel report constructed.', file=sys.stderr)
-    return (channel_report_html, num_items_in_channel_report)
+        already_known_ids |= set(video['id'] for video in playlist['entries'])
+    logger.info('Channel report constructed.')
+    return (channel_report_html,
+            channel_playlist_name,
+            num_items_in_channel_report)
 
-def write_report(report_file_base_name,
+def write_report(report_file,
                  report_html_chunks,
-                 report_start_timestamp,
-                 num_items_in_report):
-    def num_items_to_sfx(n):
-        if n == 0:
-            return 'no-items'
-        if n == 1:
-            return '1-item'
-        return f'{n}-items'
-    with open(f'{report_file_base_name}.{num_items_to_sfx(num_items_in_report)}.html', 'x') as f:
-        print('Writing report...', file=sys.stderr)
-        print('<html>\n'
-             f'<head><title>YouTube Follow Report @ {report_start_timestamp.strftime("%c (%Z)")}</title></head>\n'
-              '<body>',
-              file=f)
-        if len(report_html_chunks) > 0:
-            for html in report_html_chunks:
-                print(html, file=f)
-        else:
-            print('No new videos.', file=f)
-        print('</body>\n'
-              '</html>',
-              file=f)
-        print('Report written.', file=sys.stderr)
+                 report_start_timestamp):
+    logger = logging.getLogger('write_report')
+    logger.info('Writing report...')
+    print('<html>\n'
+         f'<head><title>YouTube Follow Report @ {report_start_timestamp.strftime("%c (%Z)")}</title></head>\n'
+          '<body>',
+          file=report_file)
+    if len(report_html_chunks) > 0:
+        for html in report_html_chunks:
+            print(html, file=report_file)
+    else:
+        print('No new videos.', file=report_file)
+    print('</body>\n'
+          '</html>',
+          file=report_file)
+    logger.info('Report written.')
+
+def use_report(report_file_name,
+               *,
+               launch=False,
+               prompt_to_delete=False,
+               delete=None):
+    logger = logging.getLogger('use_report')
+    if delete is None:
+        delete = prompt_to_delete
+    if not os.path.exists(report_file_name):
+        logger.info(f'Report file "{report_file_name}" not found, nothing to'
+                     ' do.')
+        return
+    with ClaimedFile(lock_file_name=f'{report_file_name}.lck'):
+        if launch:
+            logger.info(f'Launching report file "{report_file_name}" in web'
+                         ' browser.')
+            file_url = pathlib.Path(report_file_name).absolute().as_uri()
+            webbrowser.open_new_tab(file_url)
+        if prompt_to_delete:
+            recognized_responses = ('yes', 'no', 'y', 'n')
+            while (response := input('Delete report file'
+                                    f' "{report_file_name}"? ')).strip().lower() \
+                  not in recognized_responses:
+                print('Response not recognized.  It must be one of:'
+                     f' {", ".join(recognized_responses)}')
+            if response.strip()[0].lower() == 'n':
+                return
+        if delete:
+            logger.info(f'Deleting report file "{report_file_name}".')
+            os.remove(report_file_name)
+
+def main__usage():
+    print(USAGE.format(program=os.path.basename(sys.argv[0])))
+    return 1
+
+def main__generate_report():
+    # init
+    program_start_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
+
+    # setup logging
+    try:
+        os.remove(LOG_FILE_NAME)
+    except FileNotFoundError:
+        pass
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(LOG_FILE_NAME, mode='x', encoding='UTF-8')
+    fh.setLevel(logging.DEBUG)
+    class UTCFormatter(logging.Formatter):
+        converter = time.gmtime
+    fmtr = UTCFormatter('[%(asctime)s.%(msecs)03dZ]'
+                        ' %(levelname)s: %(name)s: %(message)s',
+                        datefmt='%Y-%m-%dT%H:%M:%S')
+    fh.setFormatter(fmtr)
+    root_logger.addHandler(fh)
+    print(f'See "{LOG_FILE_NAME}" to monitor progress.')
+    logger = logging.getLogger('main')
+    logger.info(f'Program started as PID {os.getpid()} at'
+                f' {program_start_timestamp_utc}, using config file'
+                f' "{CONFIG_FILE_NAME}", state file "{STATE_FILE_NAME}", and'
+                f' report file "{REPORT_FILE_NAME}".')
+
+    # init/read files
+    with ClaimedFile(WriteProxiedFile(STATE_FILE_NAME, encoding='UTF-8')) \
+            as (state_file, state_write_proxy_file):
+        state_modified = False
+        with ClaimedFile(WriteProxiedFile(CONFIG_FILE_NAME,
+                                          must_already_exist=True,
+                                          num_backups=float('inf'),
+                                          encoding='UTF-8')) \
+                as (config_file, config_write_proxy_file):
+            config_modified = False
+            config = load_config(config_file)
+            with ClaimedFile(WriteProxiedFile(REPORT_FILE_NAME,
+                                              encoding='UTF-8')) \
+                    as (report_file, report_write_proxy_file):
+                known_ids_map = load_state(state_file, report_file is not None)
+
+                # gather info and construct report
+                known_ids_map_before_report = copy.deepcopy(known_ids_map)
+                report_html_chunks = []
+                for channel in config['channels']:
+                    playlist_url = channel['playlist_url']
+                    known_ids = known_ids_map.setdefault(playlist_url, set())
+                    num_known_ids_before_report = len(known_ids)
+                    channel_playlist_name_in_config = channel.get('name', None)
+                    (channel_report, channel_playlist_name, _) = \
+                            gen_channel_report(known_ids,
+                                               playlist_url,
+                                               channel_playlist_name_in_config)
+                    report_html_chunks += channel_report
+                    if channel_playlist_name_in_config is None:
+                        channel['name'] = channel_playlist_name
+                        config_modified = True
+                    if num_known_ids_before_report != len(known_ids):
+                        state_modified = True
+
+                # write report
+                write_report(report_write_proxy_file,
+                             report_html_chunks,
+                             program_start_timestamp_utc)
+                # If write_report or closing of report file's `with` block
+                #  fails for any reason, exception is raised before we write
+                #  report, so we also skip logic below of updating channel
+                #  names in config file (no big deal) and writing updated state
+                #  file, which means none of the files get written and it's as
+                #  if program just never ran, which is the transactional
+                #  behavior we want.
+                # If report existed at start, but was removed by time of
+                #  writing (for instance because user had opened report,
+                #  watched videos, then deleted report, all while program was
+                #  running) then newly written report will contain videos user
+                #  already saw (because report had existed at the time this
+                #  program started).  While this may be annoying, it is at
+                #  least better than alternative of erring in favor of skipping
+                #  videos user may not have seen.  To minimize likelihood of
+                #  this, user should move report file elsewhere before opening
+                #  it, or just make sure program won't run while they're still
+                #  reading report.
+
+            # write config, if it's been modified
+            if not config_modified:
+                raise AbortProxyWrite
+            write_config(config_write_proxy_file, config)
+            # If write_config or closing of config file's `with` block fails
+            #  for any reason, it's not a big deal because new config (which
+            #  failed to write) just contained some names of channels that had
+            #  names unset in original config (not a big deal).
+
+        # write state, if it's been modified
+        if not state_modified:
+            raise AbortProxyWrite
+        write_state(state_write_proxy_file,
+                    known_ids_map_before_report,
+                    known_ids_map)
+        # If write_state or closing of state file's `with` block fails for any
+        #  reason, it's not a big deal because previous state file would still
+        #  exist, and worst case user will be re-notified of some already-seen
+        #  videos on next run of program.  If we had written state *before*
+        #  writing report, a failed report write (after successful state write)
+        #  would mean we might actually skip reporting some videos, which we
+        #  definitely don't want to happen.
+
+def main__view_report():
+    # setup logging
+    logging.basicConfig(stream=sys.stdout,
+                        format='%(levelname)s: %(name)s: %(message)s',
+                        level=logging.INFO)
+    logger = logging.getLogger('main')
+    logger.info(f'Program started as PID {os.getpid()},'
+                f' using report file "{REPORT_FILE_NAME}".')
+
+    # open report
+    use_report(REPORT_FILE_NAME, launch=True, prompt_to_delete=True)
 
 def main():
-    # init
-    start_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
-    CONFIG_FILE_NAME = 'ytf-config.json'
-    REPORT_FILE_BASE_NAME = f'new-videos.{utc_to_timestamp_sfx(start_timestamp_utc)}'
-    REPORT_CONFIG_BACKUP_FILE_NAME = f'{REPORT_FILE_BASE_NAME}.{CONFIG_FILE_NAME}.bak'
-    config = read_config(CONFIG_FILE_NAME)
-    verbose = config.get('verbose', False)
-    report_html_chunks = []
-    num_items_in_report = 0
-
-    # gather info and construct report
-    for channel in config['channels']:
-        (channel_report, num_items_in_channel_report) = gen_channel_report(channel, verbose)
-        report_html_chunks += channel_report
-        num_items_in_report += num_items_in_channel_report
-
-    # determine if new config will be written
-    #  (it's possible state/config was updated even if report yielded no items, but it's not worth reworking code to
-    #   check for precisely that condition b/c whatever data got updated would be updated again next time this runs)
-    should_write_new_config = num_items_in_report > 0
-
-    # backup initial state/config, but only if original state/config will be overwritten
-    if should_write_new_config:
-        os.rename(CONFIG_FILE_NAME, REPORT_CONFIG_BACKUP_FILE_NAME)
-
-    # write report
-    write_report(REPORT_FILE_BASE_NAME,
-                 report_html_chunks,
-                 start_timestamp_utc,
-                 num_items_in_report)
-
-    # write updated state/config, if we're supposed to
-    if should_write_new_config:
-        write_config(CONFIG_FILE_NAME, config)
+    args = sys.argv[1:]
+    if len(args) != 1:
+        return main__usage()
+    return {
+        'generate': main__generate_report,
+        'view':     main__view_report
+    }.get(args[0], main__usage)()
 
 if __name__ == '__main__':
-    sys.exit(main() or 0)
+    sys.exit(main())
