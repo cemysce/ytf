@@ -67,11 +67,13 @@ class PausedLogFile:
         self.__logger, fh = self.__get_logger_with_filehandler(self.__logger)
         if not fh:
             return None
-        self.__fh_props = {'level':     fh.level,
+        self.__fh_props = {'fullpath':  fh.baseFilename,
+                           'level':     fh.level,
                            'formatter': fh.formatter,
-                           'fullpath':  fh.baseFilename,
-                           'encoding':  fh.encoding,
-                           'errors':    fh.errors}
+                           'addl_args': {'encoding': fh.encoding}}
+        if hasattr(fh, 'errors'):
+            # FileHandler.errors was only added in Python 3.9
+            self.__fh_props['addl_args']['errors'] = fh.errors
         self.__logger.removeHandler(fh)
         self.__fh_removed = True
         fh.close()
@@ -80,8 +82,7 @@ class PausedLogFile:
         if self.__fh_removed:
             fh = logging.FileHandler(self.__fh_props['fullpath'],
                                      mode='a',
-                                     encoding=self.__fh_props['encoding'],
-                                     errors=self.__fh_props['errors'])
+                                     **self.__fh_props['addl_args'])
             fh.setLevel(self.__fh_props['level'])
             fh.setFormatter(self.__fh_props['formatter'])
             self.__logger = logging.getLogger()
