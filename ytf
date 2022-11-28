@@ -732,7 +732,7 @@ def write_state(state_file,
                 known_ids_map_after_report):
     def gen_state_from_known_ids_map(known_ids_map):
         return [{'playlist_url': playlist_url,
-                 'known_ids':    ','.join(known_ids)}
+                 'known_ids':    ','.join(sorted(known_ids))}
                 for playlist_url, known_ids in known_ids_map.items()]
     json.dump({'pre-report':  gen_state_from_known_ids_map(known_ids_map_before_report),
                'post-report': gen_state_from_known_ids_map(known_ids_map_after_report)},
