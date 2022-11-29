@@ -6,3 +6,4 @@
 
 @echo off
 python "%~dp0ytf" view
+pause
