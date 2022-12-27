@@ -985,8 +985,11 @@ def main__generate_report():
             #  names unset in original config (not a big deal).
 
         # write state, if it's been modified
-        if not state_modified:
-            raise AbortProxyWrite
+        #FIXME: commented out optimization below causes bug where already-seen
+        #        videos get reported again; temporarily disabled while a better
+        #        fix is developed
+        #if not state_modified:
+        #    raise AbortProxyWrite
         write_state(state_write_proxy_file,
                     known_ids_map_before_report,
                     known_ids_map)
