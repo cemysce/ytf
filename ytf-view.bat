@@ -5,5 +5,6 @@
 @REM LICENSE file in the root directory of this source tree.
 
 @echo off
-python "%~dp0ytf" view
+cd /d %~dp0
+python ytf view
 pause
