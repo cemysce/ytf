@@ -944,6 +944,9 @@ def use_report(report_file_name,
     logger = logging.getLogger('use_report')
     if delete is None:
         delete = prompt_to_delete
+    elif prompt_to_delete and not delete:
+        raise ValueError('cannot have prompt_to_delete be True while delete is'
+                         ' False')
     if not os.path.exists(report_file_name):
         logger.info(f'Report file "{report_file_name}" not found, nothing to'
                      ' do.')
