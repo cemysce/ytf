@@ -800,7 +800,7 @@ def load_state(state_file, report_file_exists):
                           f' "{slot}" in state file'
                           f' "{os.path.basename(state_file.name)}":'
                           f' {", ".join(duplicate_urls)}')
-    return known_ids_map
+    return state, known_ids_map
 
 def write_config(config_file, config):
     json.dump(config,
@@ -809,14 +809,18 @@ def write_config(config_file, config):
               indent=4)
 
 def write_state(state_file,
+                state_before_report,
                 known_ids_map_before_report,
                 known_ids_map_after_report):
     def gen_state_from_known_ids_map(known_ids_map):
         return [{'playlist_url': playlist_url,
                  'known_ids':    ','.join(sorted(known_ids))}
                 for playlist_url, known_ids in known_ids_map.items()]
-    json.dump({'pre-report':  gen_state_from_known_ids_map(known_ids_map_before_report),
-               'post-report': gen_state_from_known_ids_map(known_ids_map_after_report)},
+    new_state = {'pre-report':  gen_state_from_known_ids_map(known_ids_map_before_report),
+                 'post-report': gen_state_from_known_ids_map(known_ids_map_after_report)}
+    if new_state == state_before_report:
+        raise AbortProxyWrite
+    json.dump(new_state,
               state_file,
               ensure_ascii=False, # don't escape Unicode chars, leave them as-is
               indent=4)
@@ -1011,7 +1015,6 @@ def main__generate_report():
     # init/read files
     with ClaimedFile(WriteProxiedFile(STATE_FILE_NAME, encoding='UTF-8')) \
             as (state_file, state_write_proxy_file):
-        state_modified = False
         with ClaimedFile(WriteProxiedFile(CONFIG_FILE_NAME,
                                           must_already_exist=True,
                                           num_backups=float('inf'),
@@ -1022,15 +1025,16 @@ def main__generate_report():
             with ClaimedFile(WriteProxiedFile(REPORT_FILE_NAME,
                                               encoding='UTF-8')) \
                     as (report_file, report_write_proxy_file):
-                known_ids_map = load_state(state_file, report_file is not None)
+                state, known_ids_map = load_state(state_file,
+                                                  report_file is not None)
 
                 # gather info and construct report
+                state_before_report = copy.deepcopy(state)
                 known_ids_map_before_report = copy.deepcopy(known_ids_map)
                 report_html_chunks = []
                 for playlist_info in config['playlist_infos']:
                     playlist_url = playlist_info['url']
                     known_ids = known_ids_map.setdefault(playlist_url, set())
-                    num_known_ids_before_report = len(known_ids)
                     playlist_name_in_config = playlist_info.get('name', None)
                     (playlist_report, playlist_name, _) = \
                             gen_playlist_report(known_ids,
@@ -1040,8 +1044,6 @@ def main__generate_report():
                     if playlist_name_in_config is None:
                         playlist_info['name'] = playlist_name
                         config_modified = True
-                    if num_known_ids_before_report != len(known_ids):
-                        state_modified = True
 
                 # write report
                 write_report(report_write_proxy_file,
@@ -1076,12 +1078,20 @@ def main__generate_report():
             #  names unset in original config (not a big deal).
 
         # write state, if it's been modified
-        #FIXME: commented out optimization below causes bug where already-seen
-        #        videos get reported again; temporarily disabled while a better
-        #        fix is developed
-        #if not state_modified:
-        #    raise AbortProxyWrite
+        # NOTE: Modification detection is a bit more complex with state than
+        #        with config, so it's done within the function and helped by
+        #        data returned by load_state above. We cannot simply track
+        #        whether we change the state above as we're checking for new
+        #        videos, because if there were no new videos right now but
+        #        there *were* new videos in the *immediately previous* run, the
+        #        pre-report state right now would be inaccurate and have to be
+        #        updated. But rather than trying to figure out whether that is
+        #        specifically the scenario we are in, we simply pass in the
+        #        entire state object as it was right after reading the file,
+        #        and let the function determine whether anything changed and
+        #        writing the file is warranted.
         write_state(state_write_proxy_file,
+                    state_before_report,
                     known_ids_map_before_report,
                     known_ids_map)
         # If write_state or closing of state file's `with` block fails for any
