@@ -670,6 +670,87 @@ class WriteProxiedFile(BaseWriteFile):
         assert exception_was_raised
         return False
 
+class RedirectStdIO:
+
+    def __init__(self, std_fd, target_file_path, flags=None):
+
+        # validate std_fd, then do some init
+        if callable(getattr(std_fd, 'fileno', None)):
+            std_fd = std_fd.fileno()
+        if std_fd not in (0, 1, 2):
+            raise ValueError('std_fd must be stdin, stdout, or stderr')
+        self.__std_fd = std_fd
+
+        # do some init
+        self.__target_file_path = target_file_path
+
+        # validate flags, then do some init
+        if flags is None:
+            if self.__std_fd == 0:
+                self.__flags = os.O_RDONLY
+            else:
+                self.__flags = os.O_WRONLY
+                if self.__target_file_path != os.devnull:
+                    self.__flags |= os.O_APPEND | os.O_CREAT
+        else:
+            # NOTE: `man open` explains that unlike the other flags, O_RDONLY,
+            #        O_WRONLY, and O_RDWR are not actually flags, but in fact
+            #        each one is a value for the entire low order 2 bits. So,
+            #        they cannot be checked for by simply masking `flags` like
+            #        `if flags & os.O_RDONLY`, those low order bits must be
+            #        extracted and compared directly to `O_RDONLY`, etc. for
+            #        equality.
+            flags_loworder_bits = flags & 0b11
+            if self.__std_fd == 0:
+                if flags_loworder_bits not in (os.O_RDONLY, os.O_RDWR):
+                    raise ValueError('flags must be O_RDONLY or O_RDWR when'
+                                     ' std_fd is stdin')
+            else:
+                if flags_loworder_bits not in (os.O_WRONLY, os.O_RDWR):
+                    raise ValueError('flags must be O_WRONLY or O_RDWR when'
+                                     ' std_fd is stdout or stderr')
+            self.__flags = flags
+
+        # do some init
+        self.__target_file_fd = None
+        self.__std_backup_fd = None
+
+    def __enter__(self):
+
+        # open target file which we'll be redirecting std fd to/from, i.e. get
+        #  fd pointing to file description of opened target file
+        self.__target_file_fd = os.open(self.__target_file_path, self.__flags)
+
+        # create new "backup" fd pointing to same file description that std fd
+        #  is pointing to
+        self.__std_backup_fd = os.dup(self.__std_fd)
+
+        # redirect std fd to point to file description of opened target file
+        os.dup2(self.__target_file_fd, self.__std_fd)
+
+        return None
+
+    def __exit__(self, *exc_details):
+        if self.__std_backup_fd is not None:
+
+            # redirect std fd to point back to file description it had pointed
+            #  to originally
+            os.dup2(self.__std_backup_fd, self.__std_fd)
+
+            # close backup fd, but since std fd now points to same file
+            #  description, it won't actually close file, just removes backup
+            #  fd from fd table
+            os.close(self.__std_backup_fd)
+
+        if self.__target_file_fd is not None:
+
+            # close target file fd, and since now no other fd points to target
+            #  file description, it will actually close target file in addition
+            #  to removing target file fd from fd table
+            os.close(self.__target_file_fd)
+
+        return False
+
 ###############################################################################
 
 def load_config(config_file):
@@ -872,7 +953,14 @@ def use_report(report_file_name,
             logger.info(f'Launching report file "{report_file_name}" in web'
                          ' browser.')
             file_url = pathlib.Path(report_file_name).absolute().as_uri()
-            webbrowser.open_new_tab(file_url)
+
+            # webbrowser module may produce output, and provides no direct
+            #  means of suppressing it, so we just redirect stdout+stderr to
+            #  /dev/null (or Windows' equivalent) for duration of open_new_tab
+            with RedirectStdIO(sys.stdout, os.devnull), \
+                 RedirectStdIO(sys.stderr, os.devnull):
+                webbrowser.open_new_tab(file_url)
+
         if prompt_to_delete:
             recognized_responses = ('yes', 'no', 'y', 'n')
             while (response := input('Delete report file'
