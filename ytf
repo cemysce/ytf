@@ -964,11 +964,11 @@ def use_report(report_file_name,
         if prompt_to_delete:
             recognized_responses = ('yes', 'no', 'y', 'n')
             while (response := input('Delete report file'
-                                    f' "{report_file_name}"? ')).strip().lower() \
+                                    f' "{report_file_name}"? ').strip().lower()) \
                   not in recognized_responses:
                 print('Response not recognized.  It must be one of:'
                      f' {", ".join(recognized_responses)}')
-            if response.strip()[0].lower() == 'n':
+            if response.startswith('n'):
                 return
         if delete:
             logger.info(f'Deleting report file "{report_file_name}".')
