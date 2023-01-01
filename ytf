@@ -769,6 +769,7 @@ def read_config(config_file):
     return config
 
 def read_state(state_file, report_file_exists):
+    logger = logging.getLogger('read_state')
     state = ({'pre-report': [], 'post-report': []} if state_file is None
              else json.load(state_file))
     if report_file_exists:
@@ -787,6 +788,7 @@ def read_state(state_file, report_file_exists):
         #      state object we have now is just the default, so it doesn't
         #      really matter which slot we use because they're both empty.
         slot = 'post-report'
+    logger.debug(f'Will use "{slot}" slot from state file.')
     known_ids_map = {}
     duplicate_urls = set()
     for playlist_state in state[slot]:
