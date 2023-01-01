@@ -753,7 +753,7 @@ class RedirectStdIO:
 
 ###############################################################################
 
-def load_config(config_file):
+def read_config(config_file):
     config = json.load(config_file)
     duplicate_urls = {playlist_url
                       for playlist_url, count
@@ -768,7 +768,7 @@ def load_config(config_file):
                           f' {", ".join(duplicate_urls)}')
     return config
 
-def load_state(state_file, report_file_exists):
+def read_state(state_file, report_file_exists):
     state = ({'pre-report': [], 'post-report': []} if state_file is None
              else json.load(state_file))
     if report_file_exists:
@@ -1021,11 +1021,11 @@ def main__generate_report():
                                           encoding='UTF-8')) \
                 as (config_file, config_write_proxy_file):
             config_modified = False
-            config = load_config(config_file)
+            config = read_config(config_file)
             with ClaimedFile(WriteProxiedFile(REPORT_FILE_NAME,
                                               encoding='UTF-8')) \
                     as (report_file, report_write_proxy_file):
-                state, known_ids_map = load_state(state_file,
+                state, known_ids_map = read_state(state_file,
                                                   report_file is not None)
 
                 # gather info and construct report
@@ -1080,7 +1080,7 @@ def main__generate_report():
         # write state, if it's been modified
         # NOTE: Modification detection is a bit more complex with state than
         #        with config, so it's done within the function and helped by
-        #        data returned by load_state above. We cannot simply track
+        #        data returned by read_state above. We cannot simply track
         #        whether we change the state above as we're checking for new
         #        videos, because if there were no new videos right now but
         #        there *were* new videos in the *immediately previous* run, the
