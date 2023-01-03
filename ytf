@@ -848,7 +848,7 @@ def write_state(state_file, acked_video_ids, report_data):
     if pre_report_state:
         state['pre-report'] = pre_report_state
     if report_state:
-        state['report'] = report
+        state['report'] = report_state
     json.dump(state,
               state_file,
               ensure_ascii=False, # don't escape Unicode chars, leave them as-is
