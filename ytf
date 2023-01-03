@@ -768,41 +768,57 @@ def read_config(config_file):
                           f' {", ".join(duplicate_urls)}')
     return config
 
-def read_state(state_file, report_file_exists):
-    logger = logging.getLogger('read_state')
-    state = ({'pre-report': [], 'post-report': []} if state_file is None
-             else json.load(state_file))
-    if report_file_exists:
-        # A report file already exists, so we need to replace it with a fresh
-        #  one that includes everything in it, plus anything new since.  To do
-        #  that, we need to use the state as it was before that report was
-        #  generated.
-        slot = 'pre-report'
-    else:
-        # No report file exists, which normally means one of the following:
-        #   * The user already consumed and deleted it, so we need to create a
-        #      new one using the state as it was after that last report was
-        #      generated.
-        #   * This program is running for the first time in the current
-        #      directory, which means there was no state file either, so the
-        #      state object we have now is just the default, so it doesn't
-        #      really matter which slot we use because they're both empty.
-        slot = 'post-report'
-    logger.debug(f'Will use "{slot}" slot from state file.')
-    known_ids_map = {}
-    duplicate_urls = set()
-    for playlist_state in state[slot]:
-        if playlist_state['playlist_url'] in known_ids_map:
-            duplicate_urls.add(playlist_state['playlist_url'])
-        else:
-            known_ids_map[playlist_state['playlist_url']] \
-                    = set(playlist_state['known_ids'].split(','))
-    if len(duplicate_urls) > 0:
-        raise RuntimeError('Duplicate `playlist_url` values found under'
-                          f' "{slot}" in state file'
-                          f' "{os.path.basename(state_file.name)}":'
-                          f' {", ".join(duplicate_urls)}')
-    return state, known_ids_map
+def read_state(state_file):
+    state = {} if state_file is None else json.load(state_file)
+
+    # read video IDs acknowledged by user before last report
+    video_ids_acked_before_last_report = None
+    if 'pre-report' in state:
+        video_ids_acked_before_last_report = {}
+        duplicate_urls = set()
+        for playlist_pre_report_state in state['pre-report']:
+            playlist_url = playlist_pre_report_state['playlist_url']
+            if playlist_url in video_ids_acked_before_last_report:
+                duplicate_urls.add(playlist_url)
+                continue
+            video_ids_acked_before_last_report[playlist_url] \
+                    = set(playlist_pre_report_state['acked_video_ids']
+                                  .split(','))
+        if len(duplicate_urls) > 0:
+            raise RuntimeError('Duplicate `playlist_url` values found under'
+                               ' "pre-report" in state file'
+                              f' "{os.path.basename(state_file.name)}":'
+                              f' {", ".join(duplicate_urls)}')
+
+    # read data that went into last report
+    last_report_data = None
+    if 'report' in state:
+        last_report_data = {}
+        duplicate_urls = set()
+        for playlist_report_state in state['report']:
+            playlist_url = playlist_report_state['playlist_url']
+            if playlist_url in last_report_data:
+                duplicate_urls.add(playlist_url)
+                continue
+            playlist_report_data = last_report_data.setdefault(playlist_url,
+                                                               {})
+            playlist_report_data['playlist_name'] \
+                    = playlist_report_state['playlist_name']
+            playlist_report_data['webpage_url'] \
+                    = playlist_report_state['webpage_url']
+            if 'notices' in playlist_report_state:
+                playlist_report_data['notices'] \
+                        = playlist_report_state['notices']
+            if 'videos_older_to_newer' in playlist_report_state:
+                playlist_report_data['videos_older_to_newer'] \
+                        = playlist_report_state['videos_older_to_newer']
+        if len(duplicate_urls) > 0:
+            raise RuntimeError('Duplicate `playlist_url` values found under'
+                               ' "report" in state file'
+                              f' "{os.path.basename(state_file.name)}":'
+                              f' {", ".join(duplicate_urls)}')
+
+    return video_ids_acked_before_last_report, last_report_data
 
 def write_config(config_file, config):
     json.dump(config,
@@ -811,32 +827,48 @@ def write_config(config_file, config):
               indent=4)
     print(file=config_file) # json.dump doesn't print final line terminator
 
-def write_state(state_file,
-                state_before_report,
-                known_ids_map_before_report,
-                known_ids_map_after_report):
-    def gen_state_from_known_ids_map(known_ids_map):
-        return [{'playlist_url': playlist_url,
-                 'known_ids':    ','.join(sorted(known_ids))}
-                for playlist_url, known_ids in known_ids_map.items()]
-    new_state = {'pre-report':  gen_state_from_known_ids_map(known_ids_map_before_report),
-                 'post-report': gen_state_from_known_ids_map(known_ids_map_after_report)}
-    if new_state == state_before_report:
-        raise AbortProxyWrite
-    json.dump(new_state,
+def write_state(state_file, acked_video_ids, report_data):
+    def gen_playlist_report_state(playlist_url, playlist_report_data):
+        playlist_report_state = {'playlist_url':  playlist_url,
+                                 'playlist_name': playlist_report_data['playlist_name'],
+                                 'webpage_url':   playlist_report_data['webpage_url']}
+        for field in ('notices', 'videos_older_to_newer'):
+            if field in playlist_report_data:
+                playlist_report_state[field] = playlist_report_data[field]
+        return playlist_report_state
+    pre_report_state = [{'playlist_url':    playlist_url,
+                         'acked_video_ids': ','.join(sorted(playlist_acked_video_ids))}
+                        for playlist_url, playlist_acked_video_ids
+                         in acked_video_ids.items()]
+    report_state = [gen_playlist_report_state(playlist_url,
+                                              playlist_report_data)
+                    for playlist_url, playlist_report_data
+                     in report_data.items()]
+    state = {}
+    if pre_report_state:
+        state['pre-report'] = pre_report_state
+    if report_state:
+        state['report'] = report
+    json.dump(state,
               state_file,
               ensure_ascii=False, # don't escape Unicode chars, leave them as-is
               indent=4)
     print(file=state_file) # json.dump doesn't print final line terminator
 
-def gen_playlist_report(already_known_ids, # input/output param
-                        playlist_url,
-                        playlist_name=None):
-    logger = logging.getLogger('gen_playlist_report')
+def get_playlist_report_data(playlist_report_data, # input/output param
+                             playlist_acked_video_ids,
+                             playlist_url,
+                             playlist_name=None):
+    logger = logging.getLogger('get_playlist_report_data')
     if playlist_name is None:
         playlist_name_text = ''
     else:
         playlist_name_text = f' ("{playlist_name}")'
+    already_known_video_ids = copy.deepcopy(playlist_acked_video_ids)
+    if 'videos_older_to_newer' in playlist_report_data:
+        already_known_video_ids \
+                |= {v['id']
+                    for v in playlist_report_data['videos_older_to_newer']}
     logger.info(f'Downloading playlist at {playlist_url}{playlist_name_text}'
                  ' (may take several minutes if many videos):')
     with PausedLogFile(logger) as lfn:
@@ -886,58 +918,66 @@ def gen_playlist_report(already_known_ids, # input/output param
                                                  stderr=lf, # stderr goes to log file
                                                  check=True,
                                                  encoding='UTF-8').stdout)
-    logger.info('Download complete, constructing playlist report...')
+    logger.info('Playlist download complete, constructing report data...')
     if playlist_name is None:
         playlist_name = playlist['title']
-    playlist_report_html = []
-    num_items_in_playlist_report = 0
+    playlist_report_data['playlist_name'] = playlist_name
+    playlist_report_data['webpage_url'] = playlist['webpage_url']
     if len(playlist['entries']) > 0:
-        known_id_found = False
-        videos_html_newest_to_oldest = []
+        encountered_already_known_id = False
+        videos_older_to_newer = collections.deque()
         for video in playlist['entries']:
-            if video['id'] in already_known_ids:
-                known_id_found = True
+            if video['id'] in already_known_video_ids:
+                encountered_already_known_id = True
                 break
-            # Embedding HTML below was taken from right-clicking a video on YouTube, selecting "Copy embed code",
-            #  tweaking the size, and replacing static data with variables:
-            videos_html_newest_to_oldest.append(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}">{html.escape(video["title"])}</a><br/>\n'
-                                                 '       <iframe width="480"\n'
-                                                 '               height="360"\n'
-                                                f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
-                                                f'               title="{video["title"]}"\n'
-                                                 '               frameborder="0"\n'
-                                                 '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
-                                                 '               allowfullscreen></iframe></p>')
-        if len(videos_html_newest_to_oldest) > 0 or (len(already_known_ids) > 0 and not known_id_found):
-            # NOTE: We use CSS `padding-left` below instead of `text-indent`
-            #        because the latter only indents the first contained line
-            #        and we want to indent all the lines together.
-            playlist_report_html += [f'<h2><a href="{playlist["webpage_url"]}">{html.escape(playlist_name)}</a></h2>',
-                                      '    <div style="padding-left: 50px;">',
-                                      '    New videos, older to newer:']
-            if len(already_known_ids) > 0 and not known_id_found:
-                playlist_report_html.append('    <p><b>WARNING:</b> No previously known video IDs were found during this run, so one or more videos may be missing in list below!</p>')
-                num_items_in_playlist_report += 1
-            playlist_report_html += reversed(videos_html_newest_to_oldest)
-            num_items_in_playlist_report += len(videos_html_newest_to_oldest)
-            playlist_report_html.append('    </div>')
-        already_known_ids |= set(video['id'] for video in playlist['entries'])
-    logger.info('Playlist report constructed.')
-    return playlist_report_html, playlist_name, num_items_in_playlist_report
+            videos_older_to_newer.appendleft({'id':    video['id'],
+                                              'title': video['title']})
+        if (    len(already_known_video_ids) > 0
+            and not encountered_already_known_id):
+            playlist_report_data.setdefault('notices', set()).add(
+                    'No previously known video IDs were encountered during'
+                    ' this run, so one or more videos may be missing in list'
+                    ' below!')
+        if len(videos_older_to_newer) > 0:
+            playlist_report_data.setdefault('videos_older_to_newer',
+                                            []).extend(videos_older_to_newer)
+    logger.info('Playlist report data constructed.')
+    return playlist_name
 
-def write_report(report_file,
-                 report_html_chunks,
-                 report_start_timestamp):
+def write_report(report_file, report_data, report_start_timestamp):
     logger = logging.getLogger('write_report')
     logger.info('Writing report...')
     print('<html>\n'
          f'<head><title>YouTube Follow Report @ {report_start_timestamp.strftime("%c (%Z)")}</title></head>\n'
           '<body>',
           file=report_file)
-    if len(report_html_chunks) > 0:
-        for html in report_html_chunks:
-            print(html, file=report_file)
-    else:
+    for playlist_url, playlist_report_data in report_data.items():
+        # NOTE: We use CSS `padding-left` below instead of `text-indent`
+        #        because the latter only indents the first contained line and
+        #        we want to indent all the lines together.
+        print(f'<h2><a href="{playlist_report_data["webpage_url"]}">{html.escape(playlist_report_data["playlist_name"])}</a></h2>\n'
+               '    <div style="padding-left: 50px;">\n'
+               '    New videos, older to newer:',
+              file=report_file)
+        for notice in playlist_report_data.get('notices', []):
+            print(f'    <p><b>WARNING:</b> {html.escape(notice)}</p>',
+                  file=report_file)
+        for video in playlist_report_data.get('videos_older_to_newer', []):
+            # NOTE: The following HTML code for embedding a YouTube video was
+            #        taken from right-clicking a video on YouTube, selecting
+            #        "Copy embed code", tweaking the size, and replacing static
+            #        data with variables:
+            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}">{html.escape(video["title"])}</a><br/>\n'
+                   '       <iframe width="480"\n'
+                   '               height="360"\n'
+                  f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
+                  f'               title="{video["title"]}"\n'
+                   '               frameborder="0"\n'
+                   '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
+                   '               allowfullscreen></iframe></p>',
+                  file=report_file)
+        print('    </div>', file=report_file)
+    if len(report_data) == 0:
         print('No new videos.', file=report_file)
     print('</body>\n'
           '</html>',
@@ -1029,48 +1069,109 @@ def main__generate_report():
             with ClaimedFile(WriteProxiedFile(REPORT_FILE_NAME,
                                               encoding='UTF-8')) \
                     as (report_file, report_write_proxy_file):
-                state, known_ids_map = read_state(state_file,
-                                                  report_file is not None)
+                (video_ids_acked_before_last_report,
+                 last_report_data) = read_state(state_file)
+                # NOTE: Later, when writing new state, we'll compare it to the
+                #        state we just read, so in both cases below we must
+                #        deep copy anything which will/may get modified.
+                if report_file is None:
+                    # No report file exists, which should mean either:
+                    #   * This program is running for the first time (in the
+                    #      current directory), which means there's also no
+                    #      state file yet, so the state object we have now is
+                    #      empty.
+                    #   * The user already viewed and deleted it, so we need to
+                    #      create a new one using the state as it was after
+                    #      that deleted report was generated (which we'll
+                    #      construct by adding the IDs in last report's data to
+                    #      the IDs that the user had acknowledged before the
+                    #      last report was generated).
+                    logger.debug('Report file not found, so set of user-acked'
+                                 ' video IDs = set of video IDs acked before'
+                                 ' last report (if any) + set of video IDs'
+                                 ' used in last report (if any), and new'
+                                 ' report\'s data starts out empty.')
+                    acked_video_ids = (
+                            {} if video_ids_acked_before_last_report is None
+                            else copy.deepcopy(
+                                         video_ids_acked_before_last_report))
+                    if last_report_data is not None:
+                        for (playlist_url,
+                             playlist_report_data) in last_report_data.items():
+                            acked_video_ids.setdefault(playlist_url,
+                                                       set()).update(
+                                    {v['id']
+                                     for v
+                                      in playlist_report_data[
+                                                 'videos_older_to_newer']})
+                    new_report_data = {}
+                else:
+                    # A report file already exists, so we need to replace it
+                    #  with a fresh one that includes everything currently in
+                    #  it, plus anything new since.
+                    logger.debug('Report file found, so set of user-acked'
+                                 ' video IDs = set of video IDs acked before'
+                                 ' last report (if any), and new report\'s'
+                                 ' data starts out with last report\'s data.')
+                    acked_video_ids = (
+                            {} if video_ids_acked_before_last_report is None
+                            else video_ids_acked_before_last_report)
+                    new_report_data = (
+                            {} if last_report_data is None
+                            else copy.deepcopy(last_report_data))
 
-                # gather info and construct report
-                state_before_report = copy.deepcopy(state)
-                known_ids_map_before_report = copy.deepcopy(known_ids_map)
-                report_html_chunks = []
+                # gather info
                 for playlist_info in config['playlist_infos']:
                     playlist_url = playlist_info['url']
-                    known_ids = known_ids_map.setdefault(playlist_url, set())
+                    playlist_acked_video_ids \
+                            = acked_video_ids.get(playlist_url, set())
+                    playlist_new_report_data \
+                            = new_report_data.setdefault(playlist_url, {})
                     playlist_name_in_config = playlist_info.get('name', None)
-                    (playlist_report, playlist_name, _) = \
-                            gen_playlist_report(known_ids,
-                                                playlist_url,
-                                                playlist_name_in_config)
-                    report_html_chunks += playlist_report
+                    get_playlist_report_data(playlist_new_report_data,
+                                             playlist_acked_video_ids,
+                                             playlist_url,
+                                             playlist_name_in_config)
                     if playlist_name_in_config is None:
-                        playlist_info['name'] = playlist_name
+                        playlist_name_in_config \
+                                = playlist_info['name'] \
+                                = playlist_new_report_data['playlist_name']
                         config_modified = True
+                    if not any(field in playlist_new_report_data
+                               for field in ('notices',
+                                             'videos_older_to_newer')):
+                        # NOTE: There are no notices or videos in this
+                        #        playlist's report data, so we must delete its
+                        #        entry (which we must've just recently created
+                        #        when we called `.setdefault(...)` on
+                        #        `new_report_data` above) because the rest of
+                        #        the code assumes that we only have entries for
+                        #        playlists that actually have data to go into
+                        #        the report (i.e. either notices or videos).
+                        del new_report_data[playlist_url]
 
                 # write report
                 write_report(report_write_proxy_file,
-                             report_html_chunks,
+                             new_report_data,
                              program_start_timestamp_utc)
                 # If write_report or closing of report file's `with` block
                 #  fails for any reason, exception is raised before we write
-                #  report, so we also skip logic below of updating playlist
-                #  names in config file (no big deal) and writing updated state
-                #  file, which means none of the files get written and it's as
-                #  if program just never ran, which is the transactional
-                #  behavior we want.
+                #  actual report file, so we'd also skip logic below for
+                #  updating playlist names in config file (no big deal) and
+                #  writing updated state file, thus in the end none of the
+                #  files get written and it's as if program just never ran,
+                #  which is exactly the transactional behavior we want.
                 # If report existed at start, but was removed by time of
-                #  writing (for instance because user had opened report,
-                #  watched videos, then deleted report, all while program was
-                #  running) then newly written report will contain videos user
-                #  already saw (because report had existed at the time this
-                #  program started).  While this may be annoying, it is at
-                #  least better than alternative of erring in favor of skipping
-                #  videos user may not have seen.  To minimize likelihood of
-                #  this, user should move report file elsewhere before opening
-                #  it, or just make sure program won't run while they're still
-                #  reading report.
+                #  writing (for instance because user had opened report without
+                #  using this program's "view" mode, watched videos, then
+                #  deleted report, all while this program was running) then
+                #  newly written report will contain videos user already saw
+                #  (because report had existed at the time this program
+                #  started).  While this may be annoying, it is at least better
+                #  than alternative of erring in favor of skipping videos user
+                #  may not have seen.  To prevent this from happening, user
+                #  should only view/delete report by using this program's
+                #  "view" mode.
 
             # write config, if it's been modified
             if not config_modified:
@@ -1082,23 +1183,10 @@ def main__generate_report():
             #  names unset in original config (not a big deal).
 
         # write state, if it's been modified
-        # NOTE: Modification detection is a bit more complex with state than
-        #        with config, so it's done within the function and helped by
-        #        data returned by read_state above. We cannot simply use the
-        #        existence of new videos in this run (above) as the indicator
-        #        of whether the state must be written, because if there were no
-        #        new videos right now but there *were* new videos in the run
-        #        *immediately prior*, the pre-report slot in the state right
-        #        now would be inaccurate and have to be updated. But rather
-        #        than trying to figure out whether that is specifically the
-        #        scenario we are in, we simply pass in the entire state object
-        #        as it was right after reading the file, and let the function
-        #        determine whether anything changed and writing the file is
-        #        warranted.
-        write_state(state_write_proxy_file,
-                    state_before_report,
-                    known_ids_map_before_report,
-                    known_ids_map)
+        if (    (acked_video_ids if acked_video_ids else None) == video_ids_acked_before_last_report
+            and (new_report_data if new_report_data else None) == last_report_data):
+            raise AbortProxyWrite
+        write_state(state_write_proxy_file, acked_video_ids, new_report_data)
         # If write_state or closing of state file's `with` block fails for any
         #  reason, it's not a big deal because previous state file would still
         #  exist, and worst case user will be re-notified of some already-seen

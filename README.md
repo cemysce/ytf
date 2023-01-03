@@ -26,7 +26,8 @@ ones.)
 
 ## Configuration
 
-[**_tl;dr?_**](#tldr)
+_(**TL;DR?** Click [here](#quick-basic-setup) for quick basic setup
+instructions.)_
 
 `ytf` will expect a `ytf-config.json` file to exist in the current working
 directory from which you run it.
@@ -76,28 +77,18 @@ _Example:_
 
 ### State
 
-`ytf` maintains the state of known video IDs in a `ytf-state.json` file.
+`ytf` maintains the state of acknowledged video IDs (i.e. IDs of videos that
+the user's actions indicate were either viewed or consciously ignored), as
+as well as the raw data that was used to generate the most recent report file,
+in a `ytf-state.json` file.
 
-The file should contain information about each playlist's[^pl] known videos:
-* playlist[^pl] URL
-* known video ID(s)
-  * comma-separated list
-  * if specified, will be used to limit results in report
-  * if missing, report will contain entire list of videos
-  * will be populated/updated automatically after each run
-  * **NOTE:** `yt-dlp` supports limiting query to only videos uploaded after a
-    specified date, but this feature has a few critical flaws preventing it
-    from being used here.  See comments in code for details.
-
-The file keeps this information in 2 lists, one for the state before any
-existing report file was generated, and one for the state after it was
-generated.  The **before** state is used when a report file exists and
-therefore must be regenerated as if it had never been created, and the
-**after** state is used when there is no report file (under the assumption that
-the user has deleted it because they've already viewed it).
+Beyond the (**optional!**) initial setup described below, this file is not
+intended to be user-edited, therefore its format will not be documented here.
+Modifying this file can have unintended consequences, so refrain from doing so
+unless you know what you're doing and have made a backup.
 
 If you're preparing for an initial run and don't want the report to contain the
-entire history of videos, it should be sufficient to create a state file
+entirety of each playlist's[^pl] videos, you may create an initial state file
 containing only the most recent videos' IDs:
 
 _Example:_
@@ -105,24 +96,25 @@ _Example:_
 ```json
 {
     "pre-report": [],
-    "post-report": [
         {
             "playlist_url": "https://www.youtube.com/c/NASAJPL/videos",
-            "known_ids": "UOdbwQE-0z4"
+            "acked_video_ids": "UOdbwQE-0z4"
         },
         {
             "playlist_url": "https://www.youtube.com/user/Computerphile/videos",
-            "known_ids": "2iF9PRriA7w"
+            "acked_video_ids": "2iF9PRriA7w"
         },
         {
             "playlist_url": "https://www.youtube.com/user/numberphile/videos",
-            "known_ids": "nQR1NY03zIA"
+            "acked_video_ids": "nQR1NY03zIA"
         }
     ]
 }
 ```
 
-### tl;dr
+### Quick Basic Setup
+
+_(Ignore this section if you already followed the full instructions above.)_
 
 Create a `ytf-config.json` file in the directory you'll be working in.  At the
 bare minimum, it should contain playlists'[^pl] URLs.
@@ -139,9 +131,16 @@ _Example:_
 }
 ```
 
-The first time you run `ytf` it will generate a possibly huge report containing
-all videos in these playlists[^pl], but each successive run will generate a
-report of only the videos added since the previous run.
+The first time you run `ytf` it will generate a possibly massive report
+containing all videos in these playlists[^pl], and opening such a large report
+(which contains embeds of each video) in your browser could very well bring
+your system to its knees.  However, each successive run will generate a report
+of only the videos added since the previous run.
+
+Therefore, you may choose to ignore the first generated report.  In other
+words, run `ytf` the first time to generate that massive report file, wait for
+it to complete, then delete that report file.  Reports generated from this
+point forward should be much more manageable in size.
 
 ## Running
 
@@ -152,13 +151,13 @@ in any mode, are not supported and are blocked.
 ### `generate` Mode
 
 On each `generate` run, `ytf` will get the list of videos from each
-playlist[^pl] URL you've specified in the configuration file, skip over known
-videos (if the configuration file includes the necessary information), then
-generate an HTML report of the rest of the videos (i.e. the "new" ones).  It
-will also update the state file to record what it saw for each playlist[^pl] so
-that on subsequent runs only newer videos will be reported, and if the
-configuration file was missing a name for the playlist[^pl] it will update that
-file too.
+playlist[^pl] URL you've specified in the configuration file, skip over
+already-acknowledged videos (if the configuration file includes the necessary
+information), then generate an HTML report of the rest of the videos (i.e. the
+"new" ones).  It will also update the state file to record what it saw for each
+playlist[^pl] so that on subsequent runs only newer videos will be reported,
+and if the configuration file was missing a name for the playlist[^pl] it will
+update that file too.
 
 Multiple subsequent runs in the same directory will either generate a new
 report file if none exists, or will generate an updated file (containing
@@ -177,7 +176,7 @@ Unless you know how to properly run a Python script on Windows, use the `.bat`
 convenience scripts instead of attempting to run `ytf` directly (but note that
 `ytf` must be in the same directory as the `.bat` scripts).
 
-The `.bat` scritps can be run from a Windows command prompt, or by
+The `.bat` scripts can be run from a Windows command prompt, or by
 double-clicking on them (which will open a command window).
 
 [^pl]: The term "playlist" is used throughout this project to refer to a
