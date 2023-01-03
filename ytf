@@ -809,6 +809,7 @@ def write_config(config_file, config):
               config_file,
               ensure_ascii=False, # don't escape Unicode chars, leave them as-is
               indent=4)
+    print(file=config_file) # json.dump doesn't print final line terminator
 
 def write_state(state_file,
                 state_before_report,
@@ -826,6 +827,7 @@ def write_state(state_file,
               state_file,
               ensure_ascii=False, # don't escape Unicode chars, leave them as-is
               indent=4)
+    print(file=state_file) # json.dump doesn't print final line terminator
 
 def gen_playlist_report(already_known_ids, # input/output param
                         playlist_url,
