@@ -1082,16 +1082,17 @@ def main__generate_report():
         # write state, if it's been modified
         # NOTE: Modification detection is a bit more complex with state than
         #        with config, so it's done within the function and helped by
-        #        data returned by read_state above. We cannot simply track
-        #        whether we change the state above as we're checking for new
-        #        videos, because if there were no new videos right now but
-        #        there *were* new videos in the *immediately previous* run, the
-        #        pre-report state right now would be inaccurate and have to be
-        #        updated. But rather than trying to figure out whether that is
-        #        specifically the scenario we are in, we simply pass in the
-        #        entire state object as it was right after reading the file,
-        #        and let the function determine whether anything changed and
-        #        writing the file is warranted.
+        #        data returned by read_state above. We cannot simply use the
+        #        existence of new videos in this run (above) as the indicator
+        #        of whether the state must be written, because if there were no
+        #        new videos right now but there *were* new videos in the run
+        #        *immediately prior*, the pre-report slot in the state right
+        #        now would be inaccurate and have to be updated. But rather
+        #        than trying to figure out whether that is specifically the
+        #        scenario we are in, we simply pass in the entire state object
+        #        as it was right after reading the file, and let the function
+        #        determine whether anything changed and writing the file is
+        #        warranted.
         write_state(state_write_proxy_file,
                     state_before_report,
                     known_ids_map_before_report,
