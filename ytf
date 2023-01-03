@@ -338,17 +338,17 @@ class ClaimedFile(LoggerMixin):
             except Exception as e:
                 self._logger().error(f'Failed to delete lock file: {repr(e)}')
 
-            if exception_was_raised:
-                action = 'suppress' if suppress_exception else 'allow'
-                self._logger().debug(f'Done, will {action} exception.')
-            else:
-                self._logger().debug('Done.')
+            self._logger().debug(('Done, will suppress exception.'
+                                  if suppress_exception else
+                                  'Done, will allow exception to propagate.')
+                                 if exception_was_raised else
+                                 'Done')
             return exception_was_raised and suppress_exception
 
         # If lock file's context manager (first bit of state initialized in
         #  __init__()) wasn't set, that means an exception was raised from
         #  __init__(), or from __enter__() while lock file was being opened.
-        self._logger().debug('Done, will allow exception.')
+        self._logger().debug('Done, will allow exception to propagate.')
         assert exception_was_raised
         return False
 
@@ -476,17 +476,17 @@ class WriteInPlaceFile(BaseWriteFile):
                 exc_details = (None, None, None)
             self.__file_ctxmgr = None
 
-            if exception_was_raised:
-                action = 'suppress' if suppress_exception else 'allow'
-                self._logger().debug(f'Done, will {action} exception.')
-            else:
-                self._logger().debug('Done.')
+            self._logger().debug(('Done, will suppress exception.'
+                                  if suppress_exception else
+                                  'Done, will allow exception to propagate.')
+                                 if exception_was_raised else
+                                 'Done')
             return exception_was_raised and suppress_exception
 
         # If target file's context manager (first bit of state initialized in
         #  __init__()) wasn't set, that means an exception was raised from
         #  __init__(), or from __enter__() while target file was being opened.
-        self._logger().debug('Done, will allow exception.')
+        self._logger().debug('Done, will allow exception to propagate.')
         assert exception_was_raised
         return False
 
@@ -655,18 +655,18 @@ class WriteProxiedFile(BaseWriteFile):
                                          ' file.')
                     rename_noreplace(f'{self._filename}.tmp', self._filename)
 
-            if exception_was_raised:
-                action = 'suppress' if suppress_exception else 'allow'
-                self._logger().debug(f'Done, will {action} exception.')
-            else:
-                self._logger().debug('Done.')
+            self._logger().debug(('Done, will suppress exception.'
+                                  if suppress_exception else
+                                  'Done, will allow exception to propagate.')
+                                 if exception_was_raised else
+                                 'Done')
             return exception_was_raised and suppress_exception
 
         # If write-proxy file's context manager (first bit of state initialized
         #  in __init__()) wasn't set, that means an exception was raised from
         #  __init__(), or from __enter__() while write-proxy file was being
         #  opened.
-        self._logger().debug('Done, will allow exception.')
+        self._logger().debug('Done, will allow exception to propagate.')
         assert exception_was_raised
         return False
 
