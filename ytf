@@ -45,10 +45,11 @@ STATE_FILE_NAME  = 'ytf-state.json'
 REPORT_FILE_NAME = 'new-videos.html'
 
 class PausedLogFile:
-    def __init__(self, logger=None):
-        self.__logger = logger if logger else logging.getLogger()
-        self.__fh_props = None
-        self.__fh_removed = False
+    def __init__(self, logger=None, *, reopen_mode='a'):
+        self.__logger      = logger if logger else logging.getLogger()
+        self.__reopen_mode = reopen_mode
+        self.__fh_props    = None
+        self.__fh_removed  = False
     @classmethod
     def __get_logger_with_filehandler(cls, logger):
         fhs = [h for h in logger.handlers
@@ -81,7 +82,7 @@ class PausedLogFile:
     def __exit__(self, *exc_details):
         if self.__fh_removed:
             fh = logging.FileHandler(self.__fh_props['fullpath'],
-                                     mode='a',
+                                     mode=self.__reopen_mode,
                                      **self.__fh_props['addl_args'])
             fh.setLevel(self.__fh_props['level'])
             fh.setFormatter(self.__fh_props['formatter'])
