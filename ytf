@@ -805,8 +805,6 @@ def read_state(state_file):
                                                                {})
             playlist_report_data['playlist_name'] \
                     = playlist_report_state['playlist_name']
-            playlist_report_data['webpage_url'] \
-                    = playlist_report_state['webpage_url']
             if 'notices' in playlist_report_state:
                 playlist_report_data['notices'] \
                         = playlist_report_state['notices']
@@ -830,9 +828,9 @@ def write_config(config_file, config):
 
 def write_state(state_file, acked_video_ids, report_data):
     def gen_playlist_report_state(playlist_url, playlist_report_data):
-        playlist_report_state = {'playlist_url':  playlist_url,
-                                 'playlist_name': playlist_report_data['playlist_name'],
-                                 'webpage_url':   playlist_report_data['webpage_url']}
+        playlist_report_state \
+                = {'playlist_url':  playlist_url,
+                   'playlist_name': playlist_report_data['playlist_name']}
         for field in ('notices', 'videos_older_to_newer'):
             if field in playlist_report_data:
                 playlist_report_state[field] = playlist_report_data[field]
@@ -924,7 +922,6 @@ def get_playlist_report_data(playlist_report_data, # input/output param
     if playlist_name is None:
         playlist_name = playlist['title']
     playlist_report_data['playlist_name'] = playlist_name
-    playlist_report_data['webpage_url'] = playlist['webpage_url']
     if len(playlist['entries']) > 0:
         encountered_already_known_id = False
         videos_older_to_newer = collections.deque()
@@ -932,8 +929,10 @@ def get_playlist_report_data(playlist_report_data, # input/output param
             if video['id'] in already_known_video_ids:
                 encountered_already_known_id = True
                 break
-            videos_older_to_newer.appendleft({'id':    video['id'],
-                                              'title': video['title']})
+            videos_older_to_newer.appendleft(
+                    {'id':          video['id'],
+                     'title':       video['title'],
+                     'description': video['description']})
         if (    len(already_known_video_ids) > 0
             and not encountered_already_known_id):
             playlist_report_data.setdefault('notices', set()).add(
@@ -957,7 +956,7 @@ def write_report(report_file, report_data, report_start_timestamp):
         # NOTE: We use CSS `padding-left` below instead of `text-indent`
         #        because the latter only indents the first contained line and
         #        we want to indent all the lines together.
-        print(f'<h2><a href="{playlist_report_data["webpage_url"]}">{html.escape(playlist_report_data["playlist_name"])}</a></h2>\n'
+        print(f'<h2><a href="{playlist_url}">{html.escape(playlist_report_data["playlist_name"])}</a></h2>\n'
                '    <div style="padding-left: 50px;">\n'
                '    New videos, older to newer:',
               file=report_file)
@@ -969,7 +968,10 @@ def write_report(report_file, report_data, report_start_timestamp):
             #        taken from right-clicking a video on YouTube, selecting
             #        "Copy embed code", tweaking the size, and replacing static
             #        data with variables:
-            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}">{html.escape(video["title"])}</a><br/>\n'
+            html_title       = html.escape(video['title'])
+            html_description = html.escape(video['description']).replace('\n', '&#10;')
+            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}"\n'
+                  f'          title="{html_description}">{html_title}</a><br/>\n'
                    '       <iframe width="480"\n'
                    '               height="360"\n'
                   f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
