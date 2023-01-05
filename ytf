@@ -876,6 +876,7 @@ def get_playlist_report_data(playlist_report_data, # input/output param
         with open(lfn, 'r+', encoding='UTF-8') as lf:
             lf.seek(0, io.SEEK_END)
             playlist = json.loads(subprocess.run(['yt-dlp', '--ignore-config',
+                                                            '--no-cache-dir',
                                                             '--verbose',
                                                             '--flat-playlist',
                                                                 # not documented very well, but it seems this will internally
