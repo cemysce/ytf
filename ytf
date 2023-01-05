@@ -873,51 +873,58 @@ def get_playlist_report_data(playlist_report_data, # input/output param
     with PausedLogFile(logger) as lfn:
         with open(lfn, 'r+', encoding='UTF-8') as lf:
             lf.seek(0, io.SEEK_END)
-            playlist = json.loads(subprocess.run(['yt-dlp', '--ignore-config',
-                                                            '--no-cache-dir',
-                                                            '--verbose',
-                                                            '--flat-playlist',
-                                                                # not documented very well, but it seems this will internally
-                                                                #  download only playlist pages, not each video's page, which
-                                                                #  should be faster but will also limit what metadata is
-                                                                #  available per video
-                                                            '--dump-single-json',
-                                                                # dump video data to stdout in JSON, but unlike --dump-json,
-                                                                #  this will output single JSON structure for entire retrieved
-                                                                #  subset of playlist, including metadata about playlist itself
-                                                            '--',
-                                                            playlist_url],
-                                                            # yt-dlp supports querying for only videos uploaded after a
-                                                            #  specified date, but this feature has a few critical flaws
-                                                            #  preventing it from being used here.  For channels' or users'
-                                                            #  "/videos", "/streams", or "/shorts" pages, it cannot get exact
-                                                            #  upload dates for videos when using --flat-playlist, it can only
-                                                            #  give approximate upload dates, and only if you also pass:
-                                                            #       --extractor-args youtubetab:approximate_date
-                                                            #  The approximations are calculated from text like "1 day ago",
-                                                            #  "3 months ago", "2 years ago", etc.  As you can see the
-                                                            #  precision drops dramatically as the video gets older.  For
-                                                            #  playlist ID URLs (i.e. https://.../playlist?list=...) it can't
-                                                            #  get upload dates at all, not even approximate ones.  Even when
-                                                            #  dealing with channels/users that update frequently and have
-                                                            #  done so recently, there is some instability in the upload date
-                                                            #  reported by yt-dlp, leading to unreliable reporting.
-                                                            # Playlist maintainers (and YouTube itself) can also remove or
-                                                            #  hide videos, and later restore them, and this can also subvert
-                                                            #  the expectations of this script.  yt-dlp may also unexpectedly
-                                                            #  be missing certain videos in its output, listing them sometimes
-                                                            #  but inexplicably omitting them other times -- for example this
-                                                            #  happened when YouTube was transitioning from having all content
-                                                            #  (videos, live streams, and shorts) listed together on the
-                                                            #  "/videos" page to having them on separate pages.
-                                                            # So the most reliable technique is in fact to not filter with
-                                                            #  yt-dlp but instead record the full list of IDs it returns, and
-                                                            #  on every subsequent run merge any new IDs into that list but
-                                                            #  never remove any, which is what we do below.
-                                                 stdout=subprocess.PIPE, # stdout is captured
-                                                 stderr=lf, # stderr goes to log file
-                                                 check=True,
-                                                 encoding='UTF-8').stdout)
+            cmd = ['yt-dlp', '--ignore-config',
+                             '--no-cache-dir',
+                             '--verbose',
+                             '--flat-playlist',
+                                 # not documented very well, but it seems this will internally
+                                 #  download only playlist pages, not each video's page, which
+                                 #  should be faster but will also limit what metadata is
+                                 #  available per video
+                             '--dump-single-json',
+                                 # dump video data to stdout in JSON, but unlike --dump-json,
+                                 #  this will output single JSON structure for entire retrieved
+                                 #  subset of playlist, including metadata about playlist itself
+                             '--',
+                             playlist_url]
+                             # yt-dlp supports querying for only videos uploaded after a
+                             #  specified date, but this feature has a few critical flaws
+                             #  preventing it from being used here.  For channels' or users'
+                             #  "/videos", "/streams", or "/shorts" pages, it cannot get exact
+                             #  upload dates for videos when using --flat-playlist, it can only
+                             #  give approximate upload dates, and only if you also pass:
+                             #       --extractor-args youtubetab:approximate_date
+                             #  The approximations are calculated from text like "1 day ago",
+                             #  "3 months ago", "2 years ago", etc.  As you can see the
+                             #  precision drops dramatically as the video gets older.  For
+                             #  playlist ID URLs (i.e. https://.../playlist?list=...) it can't
+                             #  get upload dates at all, not even approximate ones.  Even when
+                             #  dealing with channels/users that update frequently and have
+                             #  done so recently, there is some instability in the upload date
+                             #  reported by yt-dlp, leading to unreliable reporting.
+                             # Playlist maintainers (and YouTube itself) can also remove or
+                             #  hide videos, and later restore them, and this can also subvert
+                             #  the expectations of this script.  yt-dlp may also unexpectedly
+                             #  be missing certain videos in its output, listing them sometimes
+                             #  but inexplicably omitting them other times -- for example this
+                             #  happened when YouTube was transitioning from having all content
+                             #  (videos, live streams, and shorts) listed together on the
+                             #  "/videos" page to having them on separate pages.
+                             # So the most reliable technique is in fact to not filter with
+                             #  yt-dlp but instead record the full list of IDs it returns, and
+                             #  on every subsequent run merge any new IDs into that list but
+                             #  never remove any, which is what we do below.
+            process = subprocess.Popen(cmd,
+                                       stdout=subprocess.PIPE, # stdout is captured
+                                       stderr=lf, # stderr goes to log file
+                                       encoding='UTF-8')
+            stdout, _ = process.communicate()
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode,
+                                                    cmd,
+                                                    output=stdout,
+                                                    stderr=None)
+            playlist = json.loads(stdout)
     logger.info('Playlist download complete, constructing report data...')
     if playlist_name is None:
         playlist_name = playlist['title']
