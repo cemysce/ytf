@@ -854,6 +854,31 @@ def write_state(state_file, acked_video_ids, report_data):
               indent=4)
     print(file=state_file) # json.dump doesn't print final line terminator
 
+def json_loads_multiple(s):
+    json_dec = json.JSONDecoder()
+    objs = []
+    # NOTE: An attempt was made to implement this using bytearray since it's
+    #        mutable (whereas str and bytes require making copies, discarding
+    #        old ones, and hoping they get garbage collected promptly), but the
+    #        problem is that while other interfaces of the json module support
+    #        bytearray, crucially json.JSONDecoder.raw_decode() does not, and
+    #        that's the one function which supports partially reading something
+    #        to get a JSON object out of it without barfing because the entire
+    #        thing isn't as a whole a JSON object.
+    while len(s) > 0:
+        try:
+            idx_of_first_nonspace = next(i
+                                         for i, c in enumerate(s)
+                                         if not c.isspace())
+            if idx_of_first_nonspace > 0:
+                s = s[idx_of_first_nonspace:]
+            obj, num_bytes_read = json_dec.raw_decode(s)
+        except StopIteration:
+            break
+        objs.append(obj)
+        s = s[num_bytes_read:]
+    return objs
+
 def get_playlist_report_data(playlist_report_data, # input/output param
                              playlist_acked_video_ids,
                              playlist_url,
@@ -876,18 +901,32 @@ def get_playlist_report_data(playlist_report_data, # input/output param
             cmd = ['yt-dlp', '--ignore-config',
                              '--no-cache-dir',
                              '--verbose',
+
                              '--flat-playlist',
-                                 # not documented very well, but it seems this
-                                 #  will internally download only playlist
-                                 #  pages, not each video's page, which should
-                                 #  be faster but will also limit what metadata
-                                 #  is available per video
-                             '--dump-single-json',
-                                 # dump video data to stdout in JSON, but
-                                 #  unlike --dump-json, this will output single
-                                 #  JSON structure for entire retrieved subset
-                                 #  of playlist, including metadata about
-                                 #  playlist itself
+                                # not documented very well, but it seems this
+                                #  will internally download only playlist
+                                #  pages, not each video's page, which should
+                                #  be faster but will also limit what metadata
+                                #  is available per video
+
+                             '--lazy-playlist',
+                                # print requested info about each playlist
+                                #  entry as it's downloaded, instead of waiting
+                                #  for entire playlist to download, so we can
+                                #  kill yt-dlp once we have necessary info and
+                                #  not have to wait (this won't work with
+                                #  --dump-single-json)
+
+                             '--dump-json',
+                                # dump video data to stdout in JSON, but unlike
+                                #  --dump-single-json which outputs single JSON
+                                #  structure for entire playlist and includes
+                                #  metadata about playlist itself, this outputs
+                                #  multiple JSON newline-delimited structures
+                                #  (one per playlist entry) and some of that
+                                #  playlist metadata exposed as properties in
+                                #  each playlist entry's JSON structure
+
                              '--',
                              playlist_url]
             # yt-dlp supports querying for only videos uploaded after a
@@ -927,15 +966,19 @@ def get_playlist_report_data(playlist_report_data, # input/output param
                                                     cmd,
                                                     output=stdout,
                                                     stderr=None)
-            playlist = json.loads(stdout)
+            playlist = json_loads_multiple(stdout)
     logger.info('Playlist download complete, constructing report data...')
-    if playlist_name is None:
-        playlist_name = playlist['title']
-    playlist_report_data['playlist_name'] = playlist_name
-    if len(playlist['entries']) > 0:
+    if len(playlist) > 0:
+
+        if playlist_name is None:
+            # this playlist property is exposed as a field in each playlist
+            #  entry's data object (see comment about --dump-json)
+            playlist_name = playlist[0]['playlist_title']
+        playlist_report_data['playlist_name'] = playlist_name
+
         encountered_already_known_id = False
         videos_older_to_newer = collections.deque()
-        for video in playlist['entries']:
+        for video in playlist:
             if video['id'] in already_known_video_ids:
                 encountered_already_known_id = True
                 break
@@ -1135,20 +1178,21 @@ def main__generate_report():
                             else copy.deepcopy(last_report_data))
 
                 # gather info
-                for playlist_info in config['playlist_infos']:
-                    playlist_url = playlist_info['url']
+                for config__playlist_info in config['playlist_infos']:
+                    playlist_url = config__playlist_info['url']
                     playlist_acked_video_ids \
                             = acked_video_ids.get(playlist_url, set())
                     playlist_new_report_data \
                             = new_report_data.setdefault(playlist_url, {})
-                    playlist_name_in_config = playlist_info.get('name', None)
+                    playlist_name = config__playlist_info.get('name', None)
                     get_playlist_report_data(playlist_new_report_data,
                                              playlist_acked_video_ids,
                                              playlist_url,
-                                             playlist_name_in_config)
-                    if playlist_name_in_config is None:
-                        playlist_name_in_config \
-                                = playlist_info['name'] \
+                                             playlist_name)
+                    if (    playlist_name is None
+                        and 'playlist_name' in playlist_new_report_data):
+                        playlist_name \
+                                = config__playlist_info['name'] \
                                 = playlist_new_report_data['playlist_name']
                         config_modified = True
                     if not any(field in playlist_new_report_data
@@ -1162,6 +1206,7 @@ def main__generate_report():
                         #        the code assumes that we only have entries for
                         #        playlists that actually have data to go into
                         #        the report (i.e. either notices or videos).
+                        del playlist_new_report_data
                         del new_report_data[playlist_url]
 
                 # write report
