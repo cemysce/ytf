@@ -982,10 +982,12 @@ def get_playlist_report_data(playlist_report_data, # input/output param
             if video['id'] in already_known_video_ids:
                 encountered_already_known_id = True
                 break
-            videos_older_to_newer.appendleft(
-                    {'id':          video['id'],
-                     'title':       video['title'],
-                     'description': video['description']})
+            vobj = {'id':    video['id'],
+                    'title': video['title']}
+            video_description = video.get('description', None)
+            if video_description is not None:
+                vobj['description'] = video_description
+            videos_older_to_newer.appendleft(vobj)
         if (    len(already_known_video_ids) > 0
             and not encountered_already_known_id):
             playlist_report_data.setdefault('notices', set()).add(
@@ -1021,10 +1023,18 @@ def write_report(report_file, report_data, report_start_timestamp):
             #        taken from right-clicking a video on YouTube, selecting
             #        "Copy embed code", tweaking the size, and replacing static
             #        data with variables:
-            html_title       = html.escape(video['title'])
-            html_description = html.escape(video['description']).replace('\n', '&#10;')
-            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}"\n'
-                  f'          title="{html_description}">{html_title}</a><br/>\n'
+            html_safe_title = html.escape(video['title'])
+            if 'description' in video:
+                html_safe_description = html.escape(video['description']) \
+                                            .replace('\n', '&#10;')
+                tooltip_html = (
+                   '\n'
+                  f'          title="{html_safe_description}"')
+            else:
+                tooltip_html = ''
+            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}"{tooltip_html}>\n'
+                  f'           {html_safe_title}\n'
+                   '       </a><br/>\n'
                    '       <iframe width="480"\n'
                    '               height="360"\n'
                   f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
