@@ -343,7 +343,7 @@ class ClaimedFile(LoggerMixin):
                                   if suppress_exception else
                                   'Done, will allow exception to propagate.')
                                  if exception_was_raised else
-                                 'Done')
+                                 'Done.')
             return exception_was_raised and suppress_exception
 
         # If lock file's context manager (first bit of state initialized in
@@ -481,7 +481,7 @@ class WriteInPlaceFile(BaseWriteFile):
                                   if suppress_exception else
                                   'Done, will allow exception to propagate.')
                                  if exception_was_raised else
-                                 'Done')
+                                 'Done.')
             return exception_was_raised and suppress_exception
 
         # If target file's context manager (first bit of state initialized in
@@ -660,7 +660,7 @@ class WriteProxiedFile(BaseWriteFile):
                                   if suppress_exception else
                                   'Done, will allow exception to propagate.')
                                  if exception_was_raised else
-                                 'Done')
+                                 'Done.')
             return exception_was_raised and suppress_exception
 
         # If write-proxy file's context manager (first bit of state initialized
