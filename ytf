@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import platform
+import string
 import subprocess
 import sys
 import time
@@ -121,7 +122,7 @@ class LoggerMixin:
 
 # Python Standard Library's `os.rename` won't clobber on Windows.
 def __get_rename_noreplace_for_Windows():
-    logger = logging.getLogger('get_rename_noreplace_for_Windows')
+    logger = logging.getLogger('__get_rename_noreplace_for_Windows')
     logger.info('Initializing no-replace rename for Windows.')
     # nothing to initialize...
     logger.info('No-replace rename implemented as: os.rename')
@@ -130,7 +131,7 @@ def __get_rename_noreplace_for_Windows():
 # Linux's system call `renameat2(..., RENAME_NOREPLACE)` won't clobber and is
 #  atomic.
 def __get_rename_noreplace_for_Linux():
-    logger = logging.getLogger('get_rename_noreplace_for_Linux')
+    logger = logging.getLogger('__get_rename_noreplace_for_Linux')
     logger.info('Initializing no-replace rename for Linux.')
     import ctypes
     import ctypes.util
@@ -165,7 +166,7 @@ def __get_rename_noreplace_for_Linux():
 # macOS's system call `renamex_np(..., RENAME_EXCL)` won't clobber and is
 #  atomic.
 def __get_rename_noreplace_for_macOS():
-    logger = logging.getLogger('get_rename_noreplace_for_macOS')
+    logger = logging.getLogger('__get_rename_noreplace_for_macOS')
     logger.info('Initializing no-replace rename for macOS.')
     import ctypes
     import ctypes.util
@@ -671,6 +672,8 @@ class WriteProxiedFile(BaseWriteFile):
         assert exception_was_raised
         return False
 
+## OTHER UTILITIES: ###########################################################
+
 class RedirectStdIO:
 
     def __init__(self, std_fd, target_file_path, flags=None):
@@ -811,7 +814,8 @@ def windows_setup_handling_for_python_unhandled_control_signals():
     #  this function it may get garbage-collected by the time Windows calls it
     @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.DWORD)
     def windows_console_ctrl_handler(ctrl_signal):
-        # runs in new thread (created by Windows itself)
+        # runs in new thread (created by Windows itself, see:
+        #  https://github.com/python/cpython/issues/77426#issuecomment-1093781048)
 
         # init stuff
         logger = logging.getLogger('windows_console_ctrl_handler')
@@ -902,6 +906,100 @@ def windows_setup_handling_for_python_unhandled_control_signals():
                        ' logoff/shutdown events:'
                        ' https://github.com/python/cpython/issues/85470')
     return True
+
+def __get_interruptible_getch_from_tty_for_Windows():
+    logger = logging.getLogger('__get_interruptible_getch_for_Windows')
+    logger.info('Initializing interruptible getch for Windows.')
+    import msvcrt
+    def interruptible_getch_from_tty_closure():
+        # wait until keypress
+        timeout_secs = 0.1
+        while not msvcrt.kbhit():
+            time.sleep(timeout_secs)
+
+        # get keypress, return result
+        #  (msvcrt doc says the 2 bytes below indicate there's 1 more byte)
+        ch = msvcrt.getch()
+        if ch in (b'\x00', b'\xe0'):
+            return ch + msvcrt.getch()
+        return ch
+    logger.info('Interruptible getch implemented using msvcrt module (Windows'
+                ' only).')
+    return interruptible_getch_from_tty_closure
+
+def __get_interruptible_getch_from_tty_for_POSIX():
+    logger = logging.getLogger('__get_interruptible_getch_for_POSIX')
+    logger.info('Initializing interruptible getch for POSIX.')
+    import select
+    import termios
+    import tty
+    class UnbufferedNonEchoConsole:
+        def __enter__(self):
+            self.__old_attr = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            return self
+        def __exit__(self, *exc_details):
+            termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, self.__old_attr)
+    def interruptible_getch_from_tty_closure():
+        with UnbufferedNonEchoConsole():
+            # wait until keypress
+            timeout_secs = 0.1
+            while not select.select([sys.stdin], [], [], timeout_secs)[0]:
+                pass
+
+            # get keypress, return result
+            ch = b''
+            while select.select([sys.stdin], [], [], 0.0001)[0]:
+                # must use os.read, sys.stdin.read is higher level and will
+                #  read more than requested num bytes to fill its internal
+                #  buffer, thus throwing off the select call
+                ch += os.read(sys.stdin.fileno(), 1)
+        return ch
+    logger.info('Interruptible getch implemented using select.select with'
+                ' stdin (POSIX only).')
+    return interruptible_getch_from_tty_closure
+
+interruptible_getch_from_tty = {
+    'Windows': __get_interruptible_getch_from_tty_for_Windows
+}.get(platform.system(), __get_interruptible_getch_from_tty_for_POSIX)()
+
+class NonTTYException(Exception):
+    pass
+
+def confirmation_prompt(prompt,
+                        *,
+                        negative_feedback=False, # if str, use it as error msg
+                        positive_feedback=True):
+    if not os.isatty(sys.stdin.fileno()):
+        raise NonTTYException('stdin is not a TTY')
+    if not os.isatty(sys.stdout.fileno()):
+        raise NonTTYException('stdout is not a TTY')
+    print(prompt, end='', flush=True)
+    yes = (b'y', b'Y')
+    no  = (b'n', b'N')
+    if negative_feedback:
+        printable = set(string.printable.encode())
+    while True:
+        # must use something interruptible, particularly on Windows, so that
+        #  signals can interrupt main thread
+        ch = interruptible_getch_from_tty()
+        if ch in yes:
+            result = True
+            break
+        if ch in no:
+            result = False
+            break
+        if negative_feedback:
+            if len(ch) == 1 and ord(ch) in printable:
+                os.write(sys.stdout.fileno(), ch)
+            print()
+            if isinstance(negative_feedback, str):
+                print(negative_feedback)
+            print(prompt, end='', flush=True)
+    if positive_feedback:
+        os.write(sys.stdout.fileno(), ch)
+    print()
+    return result
 
 ###############################################################################
 
@@ -1231,13 +1329,10 @@ def use_report(report_file_name,
                 webbrowser.open_new_tab(file_url)
 
         if prompt_to_delete:
-            recognized_responses = ('yes', 'no', 'y', 'n')
-            while (response := input('Delete report file'
-                                    f' "{report_file_name}"? ').strip().lower()) \
-                  not in recognized_responses:
-                print('Response not recognized.  It must be one of:'
-                     f' {", ".join(recognized_responses)}')
-            if response.startswith('n'):
+            if not confirmation_prompt(
+                           f'Delete report file "{report_file_name}"? ',
+                           negative_feedback=('Response not recognized, must'
+                                              ' be "y" or "n".')):
                 return
         if delete:
             logger.info(f'Deleting report file "{report_file_name}".')
@@ -1407,8 +1502,8 @@ def main__generate_report():
             #  names unset in original config (not a big deal).
 
         # write state, if it's been modified
-        if (    (acked_video_ids if acked_video_ids else None) == video_ids_acked_before_last_report
-            and (new_report_data if new_report_data else None) == last_report_data):
+        if (    (acked_video_ids or None) == video_ids_acked_before_last_report
+            and (new_report_data or None) == last_report_data):
             raise AbortProxyWrite
         write_state(state_write_proxy_file, acked_video_ids, new_report_data)
         # If write_state or closing of state file's `with` block fails for any
