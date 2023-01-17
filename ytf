@@ -752,6 +752,157 @@ class RedirectStdIO:
 
         return False
 
+def windows_setup_handling_for_python_unhandled_control_signals():
+    logger = logging.getLogger('windows_setup_handling_for_python_unhandled_control_signals')
+
+    # References for this function's code:
+    #
+    #  Example from within CPython itself:
+    #   https://github.com/python/cpython/blob/3.8/Lib/test/win_console_handler.py
+    #
+    #  Example from a bug report (better than above):
+    #   https://github.com/python/cpython/issues/85470
+    #
+    #  CTRL_*_EVENT values, timeouts, and handler behavior:
+    #   https://learn.microsoft.com/en-us/windows/console/handlerroutine
+    #   https://stackoverflow.com/questions/3640633/setconsolectrlhandler-routine-issue
+    #
+    #  SetConsoleCtrlHandler:
+    #   https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
+
+    import ctypes
+    import ctypes.wintypes
+    import enum
+    import signal
+    import threading
+
+    class WindowsControlSignal(enum.IntEnum):
+        # NOTE: signal module defines its own CTRL_C_EVENT and CTRL_BREAK_EVENT
+        #        (with same values as below) but not other CTRL_*_EVENT values,
+        #        so we just define all of them without using signal module.
+        CTRL_C_EVENT        =  0, True          # Ctrl+C
+        CTRL_BREAK_EVENT    =  1, False         # Ctrl+Break
+        CTRL_CLOSE_EVENT    =  2, False, 5000   # close console window
+        CTRL_LOGOFF_EVENT   =  5, False, 500    # logoff
+        CTRL_SHUTDOWN_EVENT =  6, False, 500    # shutdown
+        UNKNOWN_CTRL_SIGNAL = -1, False, 500
+        def __new__(cls,
+                    value,
+                    python_should_handle,
+                    unavoidable_termination_msec=None):
+            obj = int.__new__(cls)
+            obj._value_ = value
+            obj.python_should_handle = python_should_handle
+            obj.unavoidable_termination_msec = unavoidable_termination_msec
+            return obj
+
+    def interrupt_main_thread():
+        # Signals always get handled by the main thread in Python.  SIGINT is
+        #  handled by Python on all OSes, by raising a KeyboardInterrupt
+        #  exception, but it does not really support other signals well on
+        #  Windows, so we just use SIGINT.  See:
+        #   https://github.com/python/cpython/issues/70538
+        #   https://stackoverflow.com/questions/47306805/signal-sigterm-not-received-by-subprocess-on-windows
+        signal.raise_signal(signal.SIGINT)
+
+    global windows_console_ctrl_handler
+    # handler is passed via C interface, so it must be global, else it will be
+    #  in this function's scope, and with no in-Python reference to it outside
+    #  this function it may get garbage-collected by the time Windows calls it
+    @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.DWORD)
+    def windows_console_ctrl_handler(ctrl_signal):
+        # runs in new thread (created by Windows itself)
+
+        # init stuff
+        logger = logging.getLogger('windows_console_ctrl_handler')
+        try:
+            ctrl_signal = WindowsControlSignal(ctrl_signal)
+            ctrl_signal_display = f'{ctrl_signal.name} ({ctrl_signal.value})'
+        except ValueError:
+            ctrl_signal_display = f'unknown control signal ({ctrl_signal})'
+            ctrl_signal = WindowsControlSignal.UNKNOWN_CTRL_SIGNAL
+            logger.error(f'Received {ctrl_signal_display}, will treat it as'
+                          ' signal that Python won\'t handle and which has'
+                          ' unavoidable termination by Windows.')
+
+        # don't handle signals here that Python should handle
+        if ctrl_signal.python_should_handle:
+            logger.debug(f'Ignoring {ctrl_signal_display} here, since it'
+                          ' should be handled by Python.')
+            return False # signal not handled here (let it propagate to other
+                         #  registered handlers, like Python's built-in one)
+
+        # handle signals that Python won't handle and which have unavoidable
+        #  termination, by interrupting main thread (giving it a chance to
+        #  cleanup), while in this thread waiting for main thread to exit
+        if ctrl_signal.unavoidable_termination_msec is not None:
+            logger.debug(f'Received {ctrl_signal_display}, being handled in'
+                          ' new thread. Windows will forcefully terminate'
+                          ' program in as little as'
+                         f' {ctrl_signal.unavoidable_termination_msec} msec if'
+                          ' it does not exit on its own by then. Will now'
+                          ' interrupt main thread to induce graceful exit,'
+                          ' which will hopefully happen within available'
+                          ' time.')
+            interrupt_main_thread()
+            logger.debug('Interrupted main thread. Windows will immediately'
+                         ' forcefully terminate program once this handler'
+                         ' returns, so will now keep sleeping for as long as'
+                         ' main thread is alive, to allow any cleanup actions'
+                         ' to complete.')
+            while threading.main_thread().is_alive():
+                time.sleep(1)
+            # program should've been terminated by here, so code below
+            #  shouldn't matter
+            logger.debug('Main thread ended. Done handling control signal.')
+            return False # signal can't really be handled (returning True won't
+                         #  prevent propagation of signals that have
+                         #  unavoidable termination, so might as well return
+                         #  False since it'll anyway behave as if we did)
+
+        # handle signals that Python won't handle (and which have *avoidable*
+        #  termination) by interrupting main thread (giving it a chance to
+        #  cleanup)
+        logger.debug(f'Received {ctrl_signal_display}, being handled in new'
+                      ' thread. Will now interrupt main thread to induce'
+                      ' graceful exit.')
+        interrupt_main_thread()
+        logger.debug('Interrupted main thread. This handler will now return.'
+                     ' Done handling control signal.')
+        return True # signal was handled (don't let it propagate)
+
+    # predefined kernel32 accessor at ctypes.windll.kernel32 doesn't have
+    #  use_last_error enabled, so we must create our own accessor instance to
+    #  enable it
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    add_handler = True
+    if not kernel32.SetConsoleCtrlHandler(windows_console_ctrl_handler,
+                                          add_handler):
+        print('\n'
+              'DO NOT CLOSE THIS CONSOLE WINDOW, OR TYPE CTRL+BREAK, OR'
+              ' LOGOFF/SHUTDOWN WHILE THIS IS RUNNING!\n'
+              'Failed to register handler for these events, so if they occur,'
+              ' then cleanup will not happen.\n'
+              'To abort gracefully, type Ctrl+C.\n'
+              '\n',
+              end='',
+              file=sys.stderr)
+        logger.error('Failed to register control signal handler:'
+                    f' {ctypes.WinError(ctypes.get_last_error())}')
+        return False
+    if sys.version_info >= (3, 9):
+        print('\n'
+              'DO NOT LOGOFF/SHUTDOWN WHILE THIS IS RUNNING!\n'
+              'Python 3.9+ has a bug that prevents handling of these events,'
+              ' so if they occur, then cleanup will not happen.\n'
+              '\n',
+              end='',
+              file=sys.stderr)
+        logger.warning('Python 3.9+ has bug that prevents handling of Windows'
+                       ' logoff/shutdown events:'
+                       ' https://github.com/python/cpython/issues/85470')
+    return True
+
 ###############################################################################
 
 def read_config(config_file):
@@ -1123,6 +1274,10 @@ def main__generate_report():
                 f' "{CONFIG_FILE_NAME}", state file "{STATE_FILE_NAME}", and'
                 f' report file "{REPORT_FILE_NAME}".')
 
+    # setup signal handling for Windows
+    if platform.system() == 'Windows':
+        windows_setup_handling_for_python_unhandled_control_signals()
+
     # init/read files
     with ClaimedFile(WriteProxiedFile(STATE_FILE_NAME, encoding='UTF-8')) \
             as (state_file, state_write_proxy_file):
@@ -1272,6 +1427,10 @@ def main__view_report():
     logger = logging.getLogger('main')
     logger.info(f'Program started as PID {os.getpid()},'
                 f' using report file "{REPORT_FILE_NAME}".')
+
+    # setup signal handling for Windows
+    if platform.system() == 'Windows':
+        windows_setup_handling_for_python_unhandled_control_signals()
 
     # open report
     use_report(REPORT_FILE_NAME, launch=True, prompt_to_delete=True)
