@@ -179,6 +179,36 @@ convenience scripts instead of attempting to run `ytf` directly (but note that
 The `.bat` scripts can be run from a Windows command prompt, or by
 double-clicking on them (which will open a command window).
 
+## Lessons Learned
+
+This section is really only relevant to developers, particularly Python ones.
+Here's a list of a few techniques I learned while writing this program.  If any
+of them interest you, you may want to take a look at the source code.
+
+* safely (i.e. atomically/transactionally) handling files in Python (reading,
+  writing, renaming, etc.) to tolerate unexpected failures and concurrency, and
+  the relevant system calls for common OSes
+* using Python context managers for some of the above and for other things
+* using `ctypes` to directly call OS-specific system calls that Python does not
+  otherwise provide wrappers for via its standard library
+* handling signals/events for Windows console programs that Python does not
+  handle (like closing console window or typing Ctrl+Break while program is
+  still running)
+* keypress detection on POSIX and Windows
+* `asyncio` module to start a child process and read its stdout and stderr in
+  "parallel" reliably (i.e. without possibility of deadlock)
+* using `codecs` module to parse text from bytes on a "best effort" basis (to
+  gracefully handle cases where raw string is read in chunks and a multibyte
+  character spans multiple chunks)
+* using `json` module to parse **multiple** JSON objects in a single string,
+  and also operate on a "best effort" basis (to gracefully handle cases where
+  raw string is read in chunks and a JSON object spans multiple chunks)
+* numerous idiosyncrasies in Python, Windows, and Python's behavior on Windows,
+  some of which are actual bugs or just unresolved mysteries, with links in the
+  code
+* various `yt-dlp` options needed for running it consistently and reliably,
+  especially across multiple different OSes
+
 [^pl]: The term "playlist" is used throughout this project to refer to a
 **generalized** concept of playlists, which includes various kinds of YouTube
 pages listing videos, not just explicit playlist URLs like
