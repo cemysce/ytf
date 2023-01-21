@@ -189,8 +189,8 @@ of them interest you, you may want to take a look at the source code.
   writing, renaming, etc.) to tolerate unexpected failures and concurrency, and
   the relevant system calls for common OSes
 * using Python context managers for some of the above and for other things
-* using `ctypes` to directly call OS-specific system calls that Python does not
-  otherwise provide wrappers for via its standard library
+* using `ctypes` module to directly call OS-specific system calls that Python
+  does not otherwise provide wrappers for via its standard library
 * handling signals/events for Windows console programs that Python does not
   handle (like closing console window or typing Ctrl+Break while program is
   still running)
