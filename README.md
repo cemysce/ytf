@@ -95,7 +95,7 @@ _Example:_
 
 ```json
 {
-    "pre-report": [],
+    "pre-report": [
         {
             "playlist_url": "https://www.youtube.com/c/NASAJPL/videos",
             "acked_video_ids": "UOdbwQE-0z4"
