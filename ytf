@@ -9,6 +9,8 @@
 # YouTube Follow
 
 import abc
+import asyncio
+import codecs
 import collections
 import copy
 import datetime
@@ -20,6 +22,7 @@ import logging
 import os
 import pathlib
 import platform
+import signal
 import string
 import subprocess
 import sys
@@ -44,52 +47,6 @@ LOG_FILE_NAME    = 'ytf.log'
 CONFIG_FILE_NAME = 'ytf-config.json'
 STATE_FILE_NAME  = 'ytf-state.json'
 REPORT_FILE_NAME = 'new-videos.html'
-
-class PausedLogFile:
-    def __init__(self, logger=None, *, reopen_mode='a'):
-        self.__logger      = logger if logger else logging.getLogger()
-        self.__reopen_mode = reopen_mode
-        self.__fh_props    = None
-        self.__fh_removed  = False
-    @classmethod
-    def __get_logger_with_filehandler(cls, logger):
-        fhs = [h for h in logger.handlers
-               if isinstance(h, logging.FileHandler)]
-        if len(fhs) == 0:
-            if logger.propagate and logger.parent:
-                logger_with_fh, fh = cls.__get_logger_with_filehandler(logger.parent)
-                if fh:
-                    return logger_with_fh, fh
-            return logger, None
-        if len(fhs) > 1:
-            raise RuntimeError(f'Logger "{logger.name}" has >1 FileHandler ({len(fhs)}).')
-        assert len(fhs) == 1
-        return logger, fhs[0]
-    def __enter__(self):
-        self.__logger, fh = self.__get_logger_with_filehandler(self.__logger)
-        if not fh:
-            return None
-        self.__fh_props = {'fullpath':  fh.baseFilename,
-                           'level':     fh.level,
-                           'formatter': fh.formatter,
-                           'addl_args': {'encoding': fh.encoding}}
-        if hasattr(fh, 'errors'):
-            # FileHandler.errors was only added in Python 3.9
-            self.__fh_props['addl_args']['errors'] = fh.errors
-        self.__logger.removeHandler(fh)
-        self.__fh_removed = True
-        fh.close()
-        return self.__fh_props['fullpath']
-    def __exit__(self, *exc_details):
-        if self.__fh_removed:
-            fh = logging.FileHandler(self.__fh_props['fullpath'],
-                                     mode=self.__reopen_mode,
-                                     **self.__fh_props['addl_args'])
-            fh.setLevel(self.__fh_props['level'])
-            fh.setFormatter(self.__fh_props['formatter'])
-            self.__logger = logging.getLogger()
-            self.__logger.addHandler(fh)
-        return False
 
 class LoggerMixin:
     def __init__(self, instance_identifying_text=None):
@@ -118,6 +75,7 @@ class LoggerMixin:
             del calling_frame
             del current_frame
 
+###############################################################################
 ## GENERIC SAFE FILE-HANDLING UTILITY FUNCTIONS: ##############################
 
 # Python Standard Library's `os.rename` won't clobber on Windows.
@@ -255,6 +213,7 @@ def rename_with_backup(src, dest):
         pass
     rename_noreplace(src, dest)
 
+###############################################################################
 ## CONVENTIONAL SAFE FILE-HANDLING UTILITY FUNCTIONS: #########################
 ## (only safe if all relevant parties follow same convention) #################
 
@@ -672,7 +631,8 @@ class WriteProxiedFile(BaseWriteFile):
         assert exception_was_raised
         return False
 
-## OTHER UTILITIES: ###########################################################
+###############################################################################
+## MISC UTILITIES: ############################################################
 
 class RedirectStdIO:
 
@@ -755,34 +715,38 @@ class RedirectStdIO:
 
         return False
 
-def windows_setup_handling_for_python_unhandled_control_signals():
-    logger = logging.getLogger('windows_setup_handling_for_python_unhandled_control_signals')
+# Sets up handling of control signals that Python doesn't normally handle, and
+#  makes it so that they interrupt this program's main thread with SIGINT.
+#  Caller just needs to ensure main thread handles SIGINT by gracefully exiting
+#  the program, and doing so quickly (since Windows will forcefully terminate
+#  the program upon receipt of certain control signals, if program does not
+#  exit of its own accord in a timely fashion).
+def windows_setup_graceful_exit_for_python_unhandled_control_signals():
+    logger = logging.getLogger(
+                     'windows_setup_graceful_exit_for_python_unhandled_control_signals')
 
-    # References for this function's code:
-    #
-    #  Example from within CPython itself:
-    #   https://github.com/python/cpython/blob/3.8/Lib/test/win_console_handler.py
-    #
-    #  Example from a bug report (better than above):
-    #   https://github.com/python/cpython/issues/85470
-    #
-    #  CTRL_*_EVENT values, timeouts, and handler behavior:
-    #   https://learn.microsoft.com/en-us/windows/console/handlerroutine
-    #   https://stackoverflow.com/questions/3640633/setconsolectrlhandler-routine-issue
-    #
-    #  SetConsoleCtrlHandler:
-    #   https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
+    # NOTE: References for this function's code:
+    #        Example from within CPython itself:
+    #         https://github.com/python/cpython/blob/3.8/Lib/test/win_console_handler.py
+    #        Example from a bug report (better than above):
+    #         https://github.com/python/cpython/issues/85470
+    #        CTRL_*_EVENT values, timeouts, and handler behavior:
+    #         https://learn.microsoft.com/en-us/windows/console/handlerroutine
+    #         https://stackoverflow.com/questions/3640633/setconsolectrlhandler-routine-issue
+    #        SetConsoleCtrlHandler:
+    #         https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
 
     import ctypes
     import ctypes.wintypes
     import enum
-    import signal
     import threading
 
+    # Define enum class to represent Windows control signals.
     class WindowsControlSignal(enum.IntEnum):
-        # NOTE: signal module defines its own CTRL_C_EVENT and CTRL_BREAK_EVENT
-        #        (with same values as below) but not other CTRL_*_EVENT values,
-        #        so we just define all of them without using signal module.
+        # NOTE: The signal module defines its own CTRL_C_EVENT and
+        #        CTRL_BREAK_EVENT (with same values as below) but not other
+        #        CTRL_*_EVENT values, so we just define all of them without
+        #        using the signal module.
         CTRL_C_EVENT        =  0, True          # Ctrl+C
         CTRL_BREAK_EVENT    =  1, False         # Ctrl+Break
         CTRL_CLOSE_EVENT    =  2, False, 5000   # close console window
@@ -799,6 +763,7 @@ def windows_setup_handling_for_python_unhandled_control_signals():
             obj.unavoidable_termination_msec = unavoidable_termination_msec
             return obj
 
+    # Define wrapper function for interrupting this program's main thread.
     def interrupt_main_thread():
         # Signals always get handled by the main thread in Python.  SIGINT is
         #  handled by Python on all OSes, by raising a KeyboardInterrupt
@@ -808,14 +773,16 @@ def windows_setup_handling_for_python_unhandled_control_signals():
         #   https://stackoverflow.com/questions/47306805/signal-sigterm-not-received-by-subprocess-on-windows
         signal.raise_signal(signal.SIGINT)
 
+    # Define control signal handler function.
+    # NOTE: The handler is registered via a C interface so it must be global,
+    #        otherwise it will be in this function's scope, and since there is
+    #        no in-Python reference to it outside of this function, it may get
+    #        garbage-collected before Windows can call it.
     global windows_console_ctrl_handler
-    # handler is passed via C interface, so it must be global, else it will be
-    #  in this function's scope, and with no in-Python reference to it outside
-    #  this function it may get garbage-collected by the time Windows calls it
     @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.DWORD)
     def windows_console_ctrl_handler(ctrl_signal):
-        # runs in new thread (created by Windows itself, see:
-        #  https://github.com/python/cpython/issues/77426#issuecomment-1093781048)
+        # NOTE: This runs in new thread that is created by Windows itself, see:
+        #        https://github.com/python/cpython/issues/77426#issuecomment-1093781048
 
         # init stuff
         logger = logging.getLogger('windows_console_ctrl_handler')
@@ -875,10 +842,12 @@ def windows_setup_handling_for_python_unhandled_control_signals():
                      ' Done handling control signal.')
         return True # signal was handled (don't let it propagate)
 
-    # predefined kernel32 accessor at ctypes.windll.kernel32 doesn't have
+    # The predefined kernel32 accessor at ctypes.windll.kernel32 doesn't have
     #  use_last_error enabled, so we must create our own accessor instance to
-    #  enable it
+    #  enable it.
     kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    # Finally, we register the above handler.
     add_handler = True
     if not kernel32.SetConsoleCtrlHandler(windows_console_ctrl_handler,
                                           add_handler):
@@ -886,26 +855,30 @@ def windows_setup_handling_for_python_unhandled_control_signals():
               'DO NOT CLOSE THIS CONSOLE WINDOW, OR TYPE CTRL+BREAK, OR'
               ' LOGOFF/SHUTDOWN WHILE THIS IS RUNNING!\n'
               'Failed to register handler for these events, so if they occur,'
-              ' then cleanup will not happen.\n'
+             f' then cleanup will not happen (see "{LOG_FILE_NAME}" for'
+              ' details).\n'
               'To abort gracefully, type Ctrl+C.\n'
               '\n',
               end='',
               file=sys.stderr)
         logger.error('Failed to register control signal handler:'
                     f' {ctypes.WinError(ctypes.get_last_error())}')
-        return False
+        return
     if sys.version_info >= (3, 9):
         print('\n'
               'DO NOT LOGOFF/SHUTDOWN WHILE THIS IS RUNNING!\n'
               'Python 3.9+ has a bug that prevents handling of these events,'
-              ' so if they occur, then cleanup will not happen.\n'
+              ' so if they occur, then cleanup will not happen (see'
+             f'"{LOG_FILE_NAME}" for details).\n'
               '\n',
               end='',
               file=sys.stderr)
         logger.warning('Python 3.9+ has bug that prevents handling of Windows'
                        ' logoff/shutdown events:'
                        ' https://github.com/python/cpython/issues/85470')
-    return True
+
+###############################################################################
+## KEYPRESS DETECTION UTILITIES: ##############################################
 
 def __get_interruptible_getch_from_tty_for_Windows():
     logger = logging.getLogger('__get_interruptible_getch_for_Windows')
@@ -968,8 +941,30 @@ class NonTTYException(Exception):
 
 def confirmation_prompt(prompt,
                         *,
-                        negative_feedback=False, # if str, use it as error msg
+                        negative_feedback=False,
                         positive_feedback=True):
+    '''Prompt user for confirmation by single keypress of Y or N.
+
+    Arguments:
+        prompt (str)                    Text to display to prompt user for
+                                         input. On invalid keypress, prompt
+                                         will be repeated.
+        negative_feedback (bool or str) If False (or empty str), do not echo
+                                         invalid keypresses.
+                                        If True or a non-empty str, echo
+                                         invalid keypress, and if a non-empty
+                                         str then print that str before
+                                         repeating prompt.
+        positive_feedback (bool)        If False, do not echo valid keypress.
+                                        If True, echo valid keypress.
+
+    Raises:
+        NonTTYException     stdin or stdout is not a TTY. Text of exception
+                             will specify which.
+
+    Returns:
+        bool    Whether user confirmed.
+    '''
     if not os.isatty(sys.stdin.fileno()):
         raise NonTTYException('stdin is not a TTY')
     if not os.isatty(sys.stdout.fileno()):
@@ -984,10 +979,10 @@ def confirmation_prompt(prompt,
         #  signals can interrupt main thread
         ch = interruptible_getch_from_tty()
         if ch in yes:
-            result = True
+            confirmed = True
             break
         if ch in no:
-            result = False
+            confirmed = False
             break
         if negative_feedback:
             if len(ch) == 1 and ord(ch) in printable:
@@ -999,9 +994,125 @@ def confirmation_prompt(prompt,
     if positive_feedback:
         os.write(sys.stdout.fileno(), ch)
     print()
-    return result
+    return confirmed
 
 ###############################################################################
+## ASYNCIO STREAMREADER UTILITIES: ############################################
+
+class IncompleteDataException(Exception):
+    pass
+
+# NOTE: When this function is called, it just returns a coroutine object, it
+#        doesn't run the code you see below.
+async def streamreader_to_json_objs(sr,
+                                    obj_cb,
+                                    *,
+                                    encoding='UTF-8',
+                                    max_chunk_size=4096):
+    '''Decodes StreamReader bytes to text, then text to JSON objects.
+
+    Arguments:
+        sr             (asyncio.StreamReader)   Interface to read from an I/O
+                                                 stream asynchronously.
+        obj_cb         (function)               Function to be called for each
+                                                 decoded JSON object. If it
+                                                 returns False, this function
+                                                 will stop reading from
+                                                 StreamReader and also return
+                                                 False.
+        encoding       (str)                    Text encoding to use when
+                                                 decoding StreamReader bytes
+                                                 (before decoding to JSON).
+        max_chunk_size (int)                    Maximum number of bytes to read
+                                                 at a time from StreamReader.
+                                                 This is purely a performance
+                                                 tunable, it should not affect
+                                                 the results as the logic can
+                                                 handle multibyte characters
+                                                 or JSON objects that span
+                                                 multiple chunks.
+
+    Raises:
+        IncompleteDataException     I/O stream contained partial data that
+                                     could not be decoded to text, or partial
+                                     text that could not be decoded to JSON.
+
+    Returns:
+        True    if all StreamReader content consumed
+        False   if returning before all StreamReader content is consumed (i.e.
+                 obj_cb returned False)
+    '''
+
+    # stateful Unicode decoder capable of partial decodes
+    unicode_dec = codecs.getincrementaldecoder(encoding)()
+
+    # stateless JSON decoder capable of partial decodes
+    #  (and separate variable to hold the state)
+    json_dec = json.JSONDecoder()
+    pending_json_data = ''
+
+    while True:
+
+        # read bytes chunk
+        chunk = await sr.read(max_chunk_size)
+        if not chunk:
+            if unicode_dec.getstate()[0]:
+                raise IncompleteDataException(
+                              f'A partial {encoding} byte sequence remains,'
+                               ' but there is no more data left to complete'
+                              f' it: {unicode_dec.getstate()[0]}')
+            if pending_json_data:
+                raise IncompleteDataException(
+                               'A partial JSON document remains, but there is'
+                               ' no more data left to complete it:'
+                              f' {pending_json_data}')
+            break
+
+        # decode bytes chunk to specified encoding (should be some kind of
+        #  Unicode) and accumulate it as pending JSON data
+        if pending_json_data:
+            # There is a partial JSON document pending from a previous
+            #  iteration, so just append the decoded chunk to it as-is.
+            pending_json_data += unicode_dec.decode(chunk)
+        else:
+            # There is no pending JSON data, so we should lstrip the next bytes
+            #  we read since there may be whitespace between JSON documents.
+            pending_json_data = unicode_dec.decode(chunk).lstrip()
+
+        # decode each whole JSON document within pending JSON data to an object
+        while pending_json_data:
+            try:
+                obj, num_bytes_read = json_dec.raw_decode(pending_json_data)
+            except json.JSONDecodeError:
+                break
+            if not obj_cb(obj):
+                return False
+            pending_json_data = pending_json_data[num_bytes_read:].lstrip()
+
+    return True
+
+# NOTE: When this function is called, it just returns a coroutine object, it
+#        doesn't run the code you see below.
+async def streamreader_to_lines(sr, line_cb, *, encoding='UTF-8'):
+    '''Decodes StreamReader bytes to lines of text.
+
+    Arguments:
+        sr       (asyncio.StreamReader) Interface to read from an I/O stream
+                                         asynchronously.
+        line_cb  (function)             Function to be called for each decoded
+                                         line.
+        encoding (str)                  Text encoding to use when decoding
+                                         StreamReader bytes.
+    '''
+    while True:
+        buf = await sr.readline()
+        if not buf:
+            break
+        line = buf.decode(encoding).rstrip()
+        line_cb(line)
+
+###############################################################################
+## BUSINESS LOGIC: ############################################################
 
 def read_config(config_file):
     config = json.load(config_file)
@@ -1103,150 +1214,236 @@ def write_state(state_file, acked_video_ids, report_data):
               indent=4)
     print(file=state_file) # json.dump doesn't print final line terminator
 
-def json_loads_multiple(s):
-    json_dec = json.JSONDecoder()
-    objs = []
-    # NOTE: An attempt was made to implement this using bytearray since it's
-    #        mutable (whereas str and bytes require making copies, discarding
-    #        old ones, and hoping they get garbage collected promptly), but the
-    #        problem is that while other interfaces of the json module support
-    #        bytearray, crucially json.JSONDecoder.raw_decode() does not, and
-    #        that's the one function which supports partially reading something
-    #        to get a JSON object out of it without barfing because the entire
-    #        thing isn't as a whole a JSON object.
-    while len(s) > 0:
-        try:
-            idx_of_first_nonspace = next(i
-                                         for i, c in enumerate(s)
-                                         if not c.isspace())
-            if idx_of_first_nonspace > 0:
-                s = s[idx_of_first_nonspace:]
-            obj, num_bytes_read = json_dec.raw_decode(s)
-        except StopIteration:
-            break
-        objs.append(obj)
-        s = s[num_bytes_read:]
-    return objs
+# NOTE: When this function is called, it just returns a coroutine object, it
+#        doesn't run the code you see below.
+async def get_playlist_report_data__async(playlist_report_data, # input/output param
+                                          playlist_acked_video_ids,
+                                          playlist_url,
+                                          playlist_name=None):
+    logger = logging.getLogger('get_playlist_report_data__async')
 
-def get_playlist_report_data(playlist_report_data, # input/output param
-                             playlist_acked_video_ids,
-                             playlist_url,
-                             playlist_name=None):
-    logger = logging.getLogger('get_playlist_report_data')
+    # init playlist display text
     if playlist_name is None:
-        playlist_name_text = ''
+        playlist_display_text = f'{playlist_url}'
     else:
-        playlist_name_text = f' ("{playlist_name}")'
+        playlist_display_text = f'{playlist_url} ("{playlist_name}")'
+
+    # init list of already-known video IDs, composed of the following:
+    #  * list of videos user has "acknowledged" by having previously deleted
+    #     report files which contained them
+    #  * if there currently is a report file, list of videos in it
     already_known_video_ids = copy.deepcopy(playlist_acked_video_ids)
     if 'videos_older_to_newer' in playlist_report_data:
         already_known_video_ids \
                 |= {v['id']
                     for v in playlist_report_data['videos_older_to_newer']}
-    logger.info(f'Downloading playlist at {playlist_url}{playlist_name_text}'
-                 ' (may take several minutes if many videos):')
-    with PausedLogFile(logger) as lfn:
-        with open(lfn, 'r+', encoding='UTF-8') as lf:
-            lf.seek(0, io.SEEK_END)
-            cmd = ['yt-dlp', '--ignore-config',
-                             '--no-cache-dir',
-                             '--verbose',
 
-                             '--flat-playlist',
-                                # not documented very well, but it seems this
-                                #  will internally download only playlist
-                                #  pages, not each video's page, which should
-                                #  be faster but will also limit what metadata
-                                #  is available per video
+    # init command to download playlist
+    cmd = ['yt-dlp', '--ignore-config',
+                     '--no-cache-dir',
+                     '--verbose',
 
-                             '--lazy-playlist',
-                                # print requested info about each playlist
-                                #  entry as it's downloaded, instead of waiting
-                                #  for entire playlist to download, so we can
-                                #  kill yt-dlp once we have necessary info and
-                                #  not have to wait (this won't work with
-                                #  --dump-single-json)
+                     '--encoding=UTF-8',
+                        # not documented very well, but is needed at least on
+                        #  Windows, where stderr output of yt-dlp may contain
+                        #  non-UTF-8 encoding otherwise (causing decoding
+                        #  errors later, since we assume UTF-8)
+                        # NOTE: manpage says this option is experimental. If it
+                        #        is ever removed, alternative fix is to be more
+                        #        lenient when decoding stderr.
 
-                             '--dump-json',
-                                # dump video data to stdout in JSON, but unlike
-                                #  --dump-single-json which outputs single JSON
-                                #  structure for entire playlist and includes
-                                #  metadata about playlist itself, this outputs
-                                #  multiple JSON newline-delimited structures
-                                #  (one per playlist entry) and some of that
-                                #  playlist metadata exposed as properties in
-                                #  each playlist entry's JSON structure
+                     '--flat-playlist',
+                        # not documented very well, but it seems this will
+                        #  internally download only playlist pages, not each
+                        #  video's page, which should be faster but will also
+                        #  limit what metadata is available per video
 
-                             '--',
-                             playlist_url]
-            # yt-dlp supports querying for only videos uploaded after a
-            #  specified date, but this feature has a few critical flaws
-            #  preventing it from being used here.  For channels' or users'
-            #  "/videos", "/streams", or "/shorts" pages, it cannot get exact
-            #  upload dates for videos when using --flat-playlist, it can only
-            #  give approximate upload dates, and only if you also pass:
-            #       --extractor-args youtubetab:approximate_date
-            #  The approximations are calculated from text like "1 day ago",
-            #  "3 months ago", "2 years ago", etc.  As you can see the
-            #  precision drops dramatically as the video gets older.  For
-            #  playlist ID URLs (i.e. https://.../playlist?list=...) it can't
-            #  get upload dates at all, not even approximate ones.  Even when
-            #  dealing with channels/users that update frequently and have
-            #  done so recently, there is some instability in the upload date
-            #  reported by yt-dlp, leading to unreliable reporting.
-            # Playlist maintainers (and YouTube itself) can also remove or
-            #  hide videos, and later restore them, and this can also subvert
-            #  the expectations of this script.  yt-dlp may also unexpectedly
-            #  be missing certain videos in its output, listing them sometimes
-            #  but inexplicably omitting them other times -- for example this
-            #  happened when YouTube was transitioning from having all content
-            #  (videos, live streams, and shorts) listed together on the
-            #  "/videos" page to having them on separate pages.
-            # So the most reliable technique is in fact to not filter with
-            #  yt-dlp but instead record the full list of IDs it returns, and
-            #  on every subsequent run merge any new IDs into that list but
-            #  never remove any, which is what we do below.
-            process = subprocess.Popen(cmd,
-                                       stdout=subprocess.PIPE, # stdout is captured
-                                       stderr=lf, # stderr goes to log file
-                                       encoding='UTF-8')
-            stdout, _ = process.communicate()
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode,
-                                                    cmd,
-                                                    output=stdout,
-                                                    stderr=None)
-            playlist = json_loads_multiple(stdout)
-    logger.info('Playlist download complete, constructing report data...')
-    if len(playlist) > 0:
+                     '--lazy-playlist',
+                        # print requested info about each playlist entry as
+                        #  it's downloaded, instead of waiting for entire
+                        #  playlist to download, so we can kill yt-dlp once we
+                        #  have necessary info and not have to wait (this won't
+                        #  work with --dump-single-json)
 
+                     '--dump-json',
+                        # dump video data to stdout in JSON, but unlike
+                        #  --dump-single-json which outputs single JSON
+                        #  structure for entire playlist and includes metadata
+                        #  about playlist itself, this outputs multiple JSON
+                        #  newline-delimited structures (one per playlist
+                        #  entry) and some of that playlist metadata exposed as
+                        #  properties in each playlist entry's JSON structure
+
+                     '--',
+                     playlist_url]
+    # yt-dlp supports querying for only videos uploaded after a specified date,
+    #  but this feature has a few critical flaws preventing it from being used
+    #  here.  For channels' or users' "/videos", "/streams", or "/shorts"
+    #  pages, it cannot get exact upload dates for videos when using
+    #  --flat-playlist, it can only give approximate upload dates, and only if
+    #  you also pass: --extractor-args youtubetab:approximate_date
+    #  The approximations are calculated from text like "1 day ago", "3 months
+    #  ago", "2 years ago", etc.  As you can see the precision drops
+    #  dramatically as the video gets older.  For playlist ID URLs (i.e.
+    #  https://.../playlist?list=...) it can't get upload dates at all, not
+    #  even approximate ones.  Even when dealing with channels/users that
+    #  update frequently and have done so recently, there is some instability
+    #  in the upload date reported by yt-dlp, leading to unreliable reporting.
+    # Playlist maintainers (and YouTube itself) can also remove or hide videos,
+    #  and later restore them, and this can also subvert the expectations of
+    #  this script.  yt-dlp may also unexpectedly be missing certain videos in
+    #  its output, listing them sometimes but inexplicably omitting them other
+    #  times -- for example this happened when YouTube was transitioning from
+    #  having all content (videos, live streams, and shorts) listed together on
+    #  the "/videos" page to having them on separate pages.
+    # So the most reliable technique is in fact to not filter with yt-dlp but
+    #  instead record the full list of IDs it returns, and on every subsequent
+    #  run merge any new IDs into that list but never remove any, which is what
+    #  we do below.
+
+    # init additional subprocess arguments
+    subprocess_kwargs = {}
+    if platform.system() == 'Windows':
+        # On Windows, CTRL_BREAK_EVENT signal (and possibly CTRL_C_EVENT
+        #  signal but the Python documentation is inconsistent with Windows
+        #  documentation, see https://github.com/python/cpython/issues/57577,
+        #  and we don't want to use CTRL_C_EVENT anyway because it has other
+        #  issues like possibly killing this process as well) can only be sent
+        #  to a process group, not an individual process, so in order to be
+        #  able to send it later to this subprocess it must be in its own
+        #  process group (the ID of which will be the same as the PID).
+        # Also on Windows, os.kill() and sending SIGTERM are aliases for
+        #  os.terminate(), which can be used on individual processes regardless
+        #  of their group or this flag, but which just calls the Win32 API
+        #  function TerminateProcess(), which immediately kills the process (it
+        #  is not handleable), and it's better that the process have a chance
+        #  to exit gracefully.
+        subprocess_kwargs['creationflags'] \
+                = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    # start playlist download subprocess, but don't yet wait for it to complete
+    # NOTE: This calls coroutine, which returns coroutine object that we
+    #        "await", which adds it to event loop (coroutine starts running)
+    #        and waits for it to "complete" (creates and starts subprocess,
+    #        returns Process object immediately for caller to interact with
+    #        running subprocess, does not wait for subprocess to complete).
+    subproc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE, # capture stdout
+                            stderr=asyncio.subprocess.PIPE, # capture stderr
+                            **subprocess_kwargs)
+    logger.info(f'Downloading playlist at {playlist_display_text}'
+                 ' (may take several minutes if many videos), started playlist'
+                f' download subprocess (yt-dlp PID {subproc.pid}).')
+
+    # init structure to hold videos listed by subprocess, and define callback
+    #  function to handle receiving info about each listed video
+    videos_older_to_newer = collections.deque()
+    def handle_video(video):
+        nonlocal playlist_name
         if playlist_name is None:
             # this playlist property is exposed as a field in each playlist
             #  entry's data object (see comment about --dump-json)
-            playlist_name = playlist[0]['playlist_title']
+            playlist_name = video['playlist_title']
         playlist_report_data['playlist_name'] = playlist_name
 
-        encountered_already_known_id = False
-        videos_older_to_newer = collections.deque()
-        for video in playlist:
-            if video['id'] in already_known_video_ids:
-                encountered_already_known_id = True
-                break
-            vobj = {'id':    video['id'],
-                    'title': video['title']}
-            video_description = video.get('description', None)
-            if video_description is not None:
-                vobj['description'] = video_description
-            videos_older_to_newer.appendleft(vobj)
-        if (    len(already_known_video_ids) > 0
-            and not encountered_already_known_id):
-            playlist_report_data.setdefault('notices', set()).add(
-                    'No previously known video IDs were encountered during'
-                    ' this run, so one or more videos may be missing in list'
-                    ' below!')
-        if len(videos_older_to_newer) > 0:
-            playlist_report_data.setdefault('videos_older_to_newer',
-                                            []).extend(videos_older_to_newer)
+        if video['id'] in already_known_video_ids:
+            logger.info(f'Encountered already-known video ID {video["id"]} in'
+                         ' playlist, attempting to abort playlist download'
+                        f' subprocess early (yt-dlp PID {subproc.pid}).')
+            if platform.system() == 'Windows':
+                # See above comments for why we use CTRL_BREAK_EVENT instead of
+                #  other process termination techniques.
+                subproc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                subproc.terminate()
+            logger.info('Terminated playlist download subprocess (yt-dlp PID'
+                       f' {subproc.pid}).')
+            return False
+        vobj = {'id':    video['id'],
+                'title': video['title']}
+        video_description = video.get('description', None)
+        if video_description is not None:
+            vobj['description'] = video_description
+        videos_older_to_newer.appendleft(vobj)
+        return True
+
+    # define callback function to handle logging each line printed to stderr
+    def handle_stderr_line(line):
+        logger.info(f'[yt-dlp({subproc.pid})] {line}')
+
+    # in "parallel", read playlist download subprocess's stdout until end or
+    #  until already-known video is encountered, and stderr until end
+    # NOTE: This calls coroutine, which returns coroutine object that we
+    #        "await", which adds it to event loop (coroutine starts running)
+    #        and waits for it to complete (it's passed two coroutine objects as
+    #        arguments (i.e. results of calling the two "streamreader_..."
+    #        coroutines), which it converts to tasks and schedules to be run in
+    #        "parallel", then waits for the return values of, which it then
+    #        returns to us here (in same order as coroutines were passed), of
+    #        which we're only concerned with the first).
+    subprocess_not_aborted \
+            = (await asyncio.gather(streamreader_to_json_objs(
+                                            subproc.stdout,
+                                            handle_video),
+                                    streamreader_to_lines(
+                                            subproc.stderr,
+                                            handle_stderr_line)))[0]
+
+    logger.info('Waiting for playlist download subprocess (yt-dlp PID'
+              f' {subproc.pid})...')
+
+    # wait for playlist download subprocess to complete (if not already)
+    # NOTE: This calls coroutine, which returns coroutine object that we
+    #        "await", which adds it to event loop (coroutine starts running)
+    #        and waits for it to complete (i.e. waits for subprocess we started
+    #        above to complete).
+    await subproc.wait()
+
+    # check subprocess's exit status (but only if we had let it run to
+    #  completion; exit status is irrelevant if we had killed subprocess,
+    #  because that would've meant it had printed all new data we needed and
+    #  we had killed it simply to avoid waiting for data we already had)
+    if subprocess_not_aborted and subproc.returncode != 0:
+        logger.error(f'Playlist download subprocess (yt-dlp PID {subproc.pid})'
+                      ' ended unsuccessfully (exit status'
+                     f' {subproc.returncode}), see "{REPORT_FILE_NAME}" for'
+                      ' more details.')
+        num_videos_gathered_successfully = len(videos_older_to_newer)
+        if num_videos_gathered_successfully > 1:
+            addl_stmt = ('but not before it returned information about'
+                        f' {num_videos_gathered_successfully} videos (which'
+                         ' won\'t be recorded in state file, so they should be'
+                         ' reported again once you fix cause of failure)')
+        elif num_videos_gathered_successfully == 1:
+            addl_stmt = ('but not before it returned information about 1 video'
+                         ' (which won\'t be recorded in state file, so it'
+                         ' should be reported again once you fix cause of'
+                         ' failure)')
+        else:
+            addl_stmt = 'and it returned no information about any videos'
+        playlist_report_data.setdefault('notices', set()).add(
+                'The playlist download subprocess ended unsuccessfully (exit'
+               f' status {subproc.returncode}), {addl_stmt}. Look within'
+               f' "{LOG_FILE_NAME}" for any errors logged from the playlist'
+               f' download subprocess (yt-dlp PID {subproc.pid}).')
+        return playlist_name
+
+    # subprocess had completed successfully, or was aborted after it printed
+    #  all new data we needed
+    logger.info('Playlist download completed successfully, constructing report'
+                ' data...')
+    if len(already_known_video_ids) > 0 and subprocess_not_aborted:
+        playlist_report_data.setdefault('notices', set()).add(
+                'None of the previously known video IDs were encountered'
+                ' during this run, so one or more videos may be missing in the'
+                ' list below!')
+    if len(videos_older_to_newer) > 0:
+        playlist_report_data.setdefault('videos_older_to_newer',
+                                        []).extend(videos_older_to_newer)
     logger.info('Playlist report data constructed.')
+
     return playlist_name
 
 def write_report(report_file, report_data, report_start_timestamp):
@@ -1335,14 +1532,22 @@ def use_report(report_file_name,
                                               ' be "y" or "n".')):
                 return
         if delete:
-            logger.info(f'Deleting report file "{report_file_name}".')
+            logger.info(f'Deleting report file "{report_file_name}". Videos'
+                         ' listed in it will not be reported again.')
             os.remove(report_file_name)
+        else:
+            logger.info(f'Keeping report file "{report_file_name}". If it is'
+                         ' still present next time this is run in "generate"'
+                         ' mode, it will be replaced with a report file'
+                         ' listing the same videos plus any newer ones.')
 
 def main__usage():
     print(USAGE.format(program=os.path.basename(sys.argv[0])))
     return 1
 
-def main__generate_report():
+# NOTE: When this function is called, it just returns a coroutine object, it
+#        doesn't run the code you see below.
+async def main__generate_report__async():
     # init
     program_start_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
 
@@ -1363,7 +1568,7 @@ def main__generate_report():
     fh.setFormatter(fmtr)
     root_logger.addHandler(fh)
     print(f'See "{LOG_FILE_NAME}" to monitor progress.')
-    logger = logging.getLogger('main')
+    logger = logging.getLogger('main__generate_report__async')
     logger.info(f'Program started as PID {os.getpid()} at'
                 f' {program_start_timestamp_utc}, using config file'
                 f' "{CONFIG_FILE_NAME}", state file "{STATE_FILE_NAME}", and'
@@ -1371,7 +1576,7 @@ def main__generate_report():
 
     # setup signal handling for Windows
     if platform.system() == 'Windows':
-        windows_setup_handling_for_python_unhandled_control_signals()
+        windows_setup_graceful_exit_for_python_unhandled_control_signals()
 
     # init/read files
     with ClaimedFile(WriteProxiedFile(STATE_FILE_NAME, encoding='UTF-8')) \
@@ -1445,10 +1650,18 @@ def main__generate_report():
                     playlist_new_report_data \
                             = new_report_data.setdefault(playlist_url, {})
                     playlist_name = config__playlist_info.get('name', None)
-                    get_playlist_report_data(playlist_new_report_data,
-                                             playlist_acked_video_ids,
-                                             playlist_url,
-                                             playlist_name)
+
+                    # get playlist data
+                    # NOTE: This calls coroutine, which returns coroutine
+                    #        object that we "await", which adds it to event
+                    #        loop (coroutine starts running) and waits for it
+                    #        to complete.
+                    await get_playlist_report_data__async(
+                                  playlist_new_report_data,
+                                  playlist_acked_video_ids,
+                                  playlist_url,
+                                  playlist_name)
+
                     if (    playlist_name is None
                         and 'playlist_name' in playlist_new_report_data):
                         playlist_name \
@@ -1473,59 +1686,68 @@ def main__generate_report():
                 write_report(report_write_proxy_file,
                              new_report_data,
                              program_start_timestamp_utc)
-                # If write_report or closing of report file's `with` block
-                #  fails for any reason, exception is raised before we write
-                #  actual report file, so we'd also skip logic below for
-                #  updating playlist names in config file (no big deal) and
-                #  writing updated state file, thus in the end none of the
-                #  files get written and it's as if program just never ran,
-                #  which is exactly the transactional behavior we want.
-                # If report existed at start, but was removed by time of
-                #  writing (for instance because user had opened report without
-                #  using this program's "view" mode, watched videos, then
-                #  deleted report, all while this program was running) then
-                #  newly written report will contain videos user already saw
-                #  (because report had existed at the time this program
-                #  started).  While this may be annoying, it is at least better
-                #  than alternative of erring in favor of skipping videos user
-                #  may not have seen.  To prevent this from happening, user
-                #  should only view/delete report by using this program's
-                #  "view" mode.
+                # NOTE: If write_report or closing of report file's `with`
+                #        block fails for any reason, exception is raised before
+                #        we write actual report file, so we'd also skip logic
+                #        below for updating playlist names in config file (no
+                #        big deal) and writing updated state file, thus in the
+                #        end none of the files get written and it's as if
+                #        program just never ran, which is exactly the
+                #        transactional behavior we want.
+                #       If report existed at start, but was removed by time of
+                #        writing (for instance because user had opened report
+                #        without using this program's "view" mode, watched
+                #        videos, then deleted report, all while this program
+                #        was running) then newly written report will contain
+                #        videos user already saw (because report had existed at
+                #        the time this program started). While this may be
+                #        annoying, it is at least better than alternative of
+                #        erring in favor of skipping videos user may not have
+                #        seen. To prevent this from happening, user should only
+                #        view/delete report via this program's "view" mode.
 
             # write config, if it's been modified
             if not config_modified:
                 raise AbortProxyWrite
             write_config(config_write_proxy_file, config)
-            # If write_config or closing of config file's `with` block fails
-            #  for any reason, it's not a big deal because new config (which
-            #  failed to write) just contained some names of playlists that had
-            #  names unset in original config (not a big deal).
+            # NOTE: If write_config or closing of config file's `with` block
+            #        fails for any reason, it's not a big deal because new
+            #        config (which failed to write) just contained some names
+            #        of playlists that had names unset in original config (not
+            #        a big deal).
 
         # write state, if it's been modified
         if (    (acked_video_ids or None) == video_ids_acked_before_last_report
             and (new_report_data or None) == last_report_data):
             raise AbortProxyWrite
         write_state(state_write_proxy_file, acked_video_ids, new_report_data)
-        # If write_state or closing of state file's `with` block fails for any
-        #  reason, it's not a big deal because previous state file would still
-        #  exist, and worst case user will be re-notified of some already-seen
-        #  videos on next run of program.  If we had written state *before*
-        #  writing report, a failed report write (after successful state write)
-        #  would mean we might actually skip reporting some videos, which we
-        #  definitely don't want to happen.
+        # NOTE: If write_state or closing of state file's `with` block fails
+        #        for any reason, it's not a big deal because previous state
+        #        file would still exist, and worst case user will be
+        #        re-notified of some already-seen videos on next run of
+        #        program. If we had written state *before* writing report, a
+        #        failed report write (after successful state write) would mean
+        #        we might actually skip reporting some videos, which we
+        #        definitely don't want to happen.
+
+def main__generate_report():
+    # NOTE: This calls coroutine, which returns coroutine object, which is
+    #        passed to .run, which creates an event loop and adds coroutine to
+    #        it (coroutine starts running) and waits for it to complete.
+    asyncio.run(main__generate_report__async())
 
 def main__view_report():
     # setup logging
     logging.basicConfig(stream=sys.stdout,
                         format='%(levelname)s: %(name)s: %(message)s',
                         level=logging.INFO)
-    logger = logging.getLogger('main')
+    logger = logging.getLogger('main__view_report')
     logger.info(f'Program started as PID {os.getpid()},'
                 f' using report file "{REPORT_FILE_NAME}".')
 
     # setup signal handling for Windows
     if platform.system() == 'Windows':
-        windows_setup_handling_for_python_unhandled_control_signals()
+        windows_setup_graceful_exit_for_python_unhandled_control_signals()
 
     # open report
     use_report(REPORT_FILE_NAME, launch=True, prompt_to_delete=True)
