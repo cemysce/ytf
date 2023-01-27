@@ -208,6 +208,15 @@ of them interest you, you may want to take a look at the source code.
   code
 * various `yt-dlp` options needed for running it consistently and reliably,
   especially across multiple different OSes
+* `subprocess` module has sloppy and documentation (repeats itself, could be
+  organized better), and is misleading:
+  * may take Python file objects as arguments, but no transcoding is done
+    between child process output and writing to file; in other words Python
+    directly passes files' descriptors to child processes (as opposed to
+    creating and passing intermediate pipes, which are then read from and
+    transcoded according to type and attributes of file object); so if parent
+    process uses one type of line ending or encoding, and child process uses
+    another, you'll end up with a corrupted or mixed-encoding file
 
 [^pl]: The term "playlist" is used throughout this project to refer to a
 **generalized** concept of playlists, which includes various kinds of YouTube
