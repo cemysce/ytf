@@ -208,8 +208,8 @@ of them interest you, you may want to take a look at the source code.
   code
 * various `yt-dlp` options needed for running it consistently and reliably,
   especially across multiple different OSes
-* `subprocess` module has sloppy and documentation (repeats itself, could be
-  organized better), and is misleading:
+* [`subprocess` module has sloppy and documentation (repeats itself, could be
+  organized better), and is misleading](https://github.com/python/cpython/issues/99864):
   * may take Python file objects as arguments, but no transcoding is done
     between child process output and writing to file; in other words Python
     directly passes files' descriptors to child processes (as opposed to
