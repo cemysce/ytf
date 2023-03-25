@@ -103,7 +103,7 @@ def __get_rename_noreplace_for_Linux():
                             ' renameat2() system call.')
     AT_FDCWD = -100
     RENAME_NOREPLACE = 1
-    def renameat2_noreplace_closure(src, dest):
+    def renameat2_noreplace__closure(src, dest):
         rc = libc.renameat2(AT_FDCWD, src.encode('UTF-8'),
                             AT_FDCWD, dest.encode('UTF-8'),
                             RENAME_NOREPLACE)
@@ -119,7 +119,7 @@ def __get_rename_noreplace_for_Linux():
                            f' renaming "{src}" to "{dest}".')
     logger.info('No-replace rename implemented as:'
                 ' Linux syscall renameat2(RENAME_NOREPLACE)')
-    return renameat2_noreplace_closure
+    return renameat2_noreplace__closure
 
 # macOS's system call `renamex_np(..., RENAME_EXCL)` won't clobber and is
 #  atomic.
@@ -137,7 +137,7 @@ def __get_rename_noreplace_for_macOS():
         raise RuntimeError(f'macOS libc "{libc_name}" is missing'
                             ' renamex_np() system call.')
     RENAME_EXCL = 0x4
-    def renamex_np_noreplace_closure(src, dest):
+    def renamex_np_noreplace__closure(src, dest):
         rc = libc.renamex_np(src.encode('UTF-8'),
                              dest.encode('UTF-8'),
                              RENAME_EXCL)
@@ -153,7 +153,7 @@ def __get_rename_noreplace_for_macOS():
                            f' renaming "{src}" to "{dest}".')
     logger.info('No-replace rename implemented as:'
                 ' macOS syscall renamex_np(RENAME_EXCL)')
-    return renamex_np_noreplace_closure
+    return renamex_np_noreplace__closure
 
 # Creating a hard link with the destination name, then unlinking the old name,
 #  is mostly safe.  It won't clobber the destination; and it doesn't "rename"
@@ -884,7 +884,7 @@ def __get_interruptible_getch_from_tty_for_Windows():
     logger = logging.getLogger('__get_interruptible_getch_for_Windows')
     logger.info('Initializing interruptible getch for Windows.')
     import msvcrt
-    def interruptible_getch_from_tty_closure():
+    def interruptible_getch_from_tty__closure():
         # wait until keypress
         timeout_secs = 0.1
         while not msvcrt.kbhit():
@@ -898,7 +898,7 @@ def __get_interruptible_getch_from_tty_for_Windows():
         return ch
     logger.info('Interruptible getch implemented using msvcrt module (Windows'
                 ' only).')
-    return interruptible_getch_from_tty_closure
+    return interruptible_getch_from_tty__closure
 
 def __get_interruptible_getch_from_tty_for_POSIX():
     logger = logging.getLogger('__get_interruptible_getch_for_POSIX')
@@ -913,7 +913,7 @@ def __get_interruptible_getch_from_tty_for_POSIX():
             return self
         def __exit__(self, *exc_details):
             termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, self.__old_attr)
-    def interruptible_getch_from_tty_closure():
+    def interruptible_getch_from_tty__closure():
         with UnbufferedNonEchoConsole():
             # wait until keypress
             timeout_secs = 0.1
@@ -930,7 +930,7 @@ def __get_interruptible_getch_from_tty_for_POSIX():
         return ch
     logger.info('Interruptible getch implemented using select.select with'
                 ' stdin (POSIX only).')
-    return interruptible_getch_from_tty_closure
+    return interruptible_getch_from_tty__closure
 
 interruptible_getch_from_tty = {
     'Windows': __get_interruptible_getch_from_tty_for_Windows
