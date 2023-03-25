@@ -1774,12 +1774,16 @@ def main__view_report():
 
 def main():
     args = sys.argv[1:]
-    if len(args) != 1:
-        return main__usage()
-    return {
-        'generate': main__generate_report,
-        'view':     main__view_report
-    }.get(args[0], main__usage)()
+    try:
+        if len(args) != 1:
+            return main__usage()
+        return {
+            'generate': main__generate_report,
+            'view':     main__view_report
+        }.get(args[0], main__usage)()
+    except KeyboardInterrupt:
+        print('\nUser interrupted program, will now exit.', file=sys.stderr)
+        return 1
 
 if __name__ == '__main__':
     sys.exit(main())
