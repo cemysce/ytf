@@ -1347,7 +1347,6 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
             #  entry's data object (see comment about --dump-json)
             playlist_name = video['playlist_title']
         playlist_report_data['playlist_name'] = playlist_name
-
         if video['id'] in already_known_video_ids:
             logger.info(f'Encountered already-known video ID {video["id"]} in'
                          ' playlist, attempting to abort playlist download'
@@ -1366,6 +1365,9 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
         video_description = video.get('description', None)
         if video_description is not None:
             vobj['description'] = video_description
+        video_thumbnails = video.get('thumbnails', None)
+        if isinstance(video_thumbnails, list) and len(video_thumbnails) > 0:
+            vobj['thumbnail'] = video_thumbnails[-1]['url']
         videos_older_to_newer.appendleft(vobj)
         return True
 
@@ -1450,7 +1452,19 @@ def write_report(report_file, report_data, report_start_timestamp):
     logger = logging.getLogger('write_report')
     logger.info('Writing report...')
     print('<html>\n'
-         f'<head><title>YouTube Follow Report @ {report_start_timestamp.strftime("%c (%Z)")}</title></head>\n'
+          '<head>\n'
+         f'<title>YouTube Follow Report @ {report_start_timestamp.strftime("%c (%Z)")}</title>\n'
+          '<script type="text/javascript">\n'
+          'function revealEmbed(thumbnailId)\n'
+          '{\n'
+          '    var embedId = thumbnailId.replace(/^thumbnail-/, "embed-");\n'
+          '    document.getElementById(thumbnailId).style.display = "none";\n'
+          '    var iframe = document.getElementById(embedId);\n'
+          '    iframe.style.display = "";\n'
+          '    iframe.src = iframe.getAttribute("data-src");\n'
+          '}\n'
+          '</script>\n'
+          '</head>\n'
           '<body>',
           file=report_file)
     for playlist_url, playlist_report_data in report_data.items():
@@ -1479,11 +1493,17 @@ def write_report(report_file, report_data, report_start_timestamp):
             else:
                 tooltip_html = ''
             print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}"{tooltip_html}>\n'
-                  f'           {html_safe_title}\n'
-                   '       </a><br/>\n'
-                   '       <iframe width="480"\n'
+                  f'           {html_safe_title}</a><br/>\n'
+                  f'       <img id="thumbnail-{video["id"]}"\n'
+                  f'            src="{video["thumbnail"]}"\n'
+                   '            style="cursor:pointer;"\n'
+                   '            onclick="revealEmbed(this.id)" /><br/>\n'
+                  f'       <iframe id="embed-{video["id"]}"\n'
+                   '               style="display:none;"\n'
+                   '               width="480"\n'
                    '               height="360"\n'
-                  f'               src="https://www.youtube.com/embed/{video["id"]}"\n'
+                   '               src=""\n'
+                  f'               data-src="https://www.youtube.com/embed/{video["id"]}"\n'
                   f'               title="{video["title"]}"\n'
                    '               frameborder="0"\n'
                    '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
