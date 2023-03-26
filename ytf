@@ -1430,8 +1430,8 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
                f' "{LOG_FILE_NAME}" for any errors logged from the playlist'
                f' download subprocess (yt-dlp PID {subproc.pid}).')
     else:
-        # subprocess had completed successfully, or we aborted it after it printed
-        #  all new data we needed
+        # subprocess had completed successfully, or we aborted it after it
+        #  printed all new data we needed
         logger.info('Playlist download completed successfully, constructing'
                     ' report data...')
         if len(already_known_video_ids) > 0 and subprocess_not_aborted:
