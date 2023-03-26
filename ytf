@@ -1346,7 +1346,6 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
             # this playlist property is exposed as a field in each playlist
             #  entry's data object (see comment about --dump-json)
             playlist_name = video['playlist_title']
-        playlist_report_data['playlist_name'] = playlist_name
         if video['id'] in already_known_video_ids:
             logger.info(f'Encountered already-known video ID {video["id"]} in'
                          ' playlist, attempting to abort playlist download'
@@ -1430,21 +1429,42 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
                f' status {subproc.returncode}), {addl_stmt}. Look within'
                f' "{LOG_FILE_NAME}" for any errors logged from the playlist'
                f' download subprocess (yt-dlp PID {subproc.pid}).')
-        return playlist_name
+    else:
+        # subprocess had completed successfully, or we aborted it after it printed
+        #  all new data we needed
+        logger.info('Playlist download completed successfully, constructing'
+                    ' report data...')
+        if len(already_known_video_ids) > 0 and subprocess_not_aborted:
+            playlist_report_data.setdefault('notices', set()).add(
+                    'None of the previously known video IDs were encountered'
+                    ' during this run, so one or more videos may be missing in'
+                    ' the list below!')
+        if len(videos_older_to_newer) > 0:
+            playlist_report_data.setdefault('videos_older_to_newer',
+                                            []).extend(videos_older_to_newer)
+        logger.info('Playlist report data constructed.')
 
-    # subprocess had completed successfully, or was aborted after it printed
-    #  all new data we needed
-    logger.info('Playlist download completed successfully, constructing report'
-                ' data...')
-    if len(already_known_video_ids) > 0 and subprocess_not_aborted:
-        playlist_report_data.setdefault('notices', set()).add(
-                'None of the previously known video IDs were encountered'
-                ' during this run, so one or more videos may be missing in the'
-                ' list below!')
-    if len(videos_older_to_newer) > 0:
-        playlist_report_data.setdefault('videos_older_to_newer',
-                                        []).extend(videos_older_to_newer)
-    logger.info('Playlist report data constructed.')
+    # if we had anything to report for this playlist (see code above), then
+    #  add playlist name (if we have it) to report
+    if any(field in playlist_report_data
+           for field in ('notices', 'videos_older_to_newer')):
+        # NOTE: Technically the condition above is somewhat redundant with the
+        #        condition below because it's (currently) not possible for the
+        #        'videos_older_to_newer' field to be present while
+        #        playlist_name is None (presence of 'videos_older_to_newer'
+        #        implies at least one video was encountered in this run or a
+        #        previous run, in which case playlist_name should already be
+        #        set here). So with that in mind, really the only time we would
+        #        have something to report for a playlist but not have its name
+        #        is if:
+        #         * we've never successfully encountered a video for the
+        #            playlist in a previous run,
+        #         * we encountered an error (like yt-dlp failing) for the
+        #            playlist in this run before any videos were returned,
+        #         * and the user had never manually set a name for the playlist
+        #            in the config file.
+        if playlist_name is not None:
+            playlist_report_data['playlist_name'] = playlist_name
 
     return playlist_name
 
@@ -1468,16 +1488,27 @@ def write_report(report_file, report_data, report_start_timestamp):
           '<body>',
           file=report_file)
     for playlist_url, playlist_report_data in report_data.items():
+        # NOTE: Under rare circumstances (see comment before conditional adding
+        #        of 'playlist_name' field to playlist_report_data in
+        #        get_playlist_report_data__async), playlist name may not yet be
+        #        known, so fallback to URL
+        playlist_display_text = playlist_report_data.get('playlist_name', playlist_url)
+
+        # add playlist's section heading to report
         # NOTE: We use CSS `padding-left` below instead of `text-indent`
         #        because the latter only indents the first contained line and
         #        we want to indent all the lines together.
-        print(f'<h2><a href="{playlist_url}">{html.escape(playlist_report_data["playlist_name"])}</a></h2>\n'
+        print(f'<h2><a href="{playlist_url}">{html.escape(playlist_display_text)}</a></h2>\n'
                '    <div style="padding-left: 50px;">\n'
                '    New videos, older to newer:',
               file=report_file)
+
+        # add playlist's notices (if any) to report
         for notice in playlist_report_data.get('notices', []):
             print(f'    <p><b>WARNING:</b> {html.escape(notice)}</p>',
                   file=report_file)
+
+        # add playlist's videos (if any) to report
         for video in playlist_report_data.get('videos_older_to_newer', []):
             # NOTE: The following HTML code for embedding a YouTube video was
             #        taken from right-clicking a video on YouTube, selecting
@@ -1509,7 +1540,10 @@ def write_report(report_file, report_data, report_start_timestamp):
                    '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
                    '               allowfullscreen></iframe></p>',
                   file=report_file)
+
+        # end playlist's section in report
         print('    </div>', file=report_file)
+
     if len(report_data) == 0:
         print('No new videos.', file=report_file)
     print('</body>\n'
