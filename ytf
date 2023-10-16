@@ -1541,6 +1541,10 @@ def write_report(report_file, report_data, report_start_timestamp):
                    '               height="360"\n'
                    '               src=""\n'
                   f'               data-src="https://www.youtube.com/embed/{video["id"]}"\n'
+                                   # NOTE: Right-clicking a YouTube video and copying embed code will include a `title`
+                                   #        attribute here, which appears to cause a tooltip to be displayed when
+                                   #        hovering over the video, but in Firefox on Windows that tooltip won't go
+                                   #        away, even in fullscreen.
                    '               frameborder="0"\n'
                    '               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"\n'
                    '               allowfullscreen></iframe></p>',
