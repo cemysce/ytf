@@ -1167,7 +1167,14 @@ def read_state(state_file):
                     = playlist_report_state['playlist_name']
             if 'notices' in playlist_report_state:
                 playlist_report_data['notices'] \
-                        = playlist_report_state['notices']
+                        = set(playlist_report_state['notices'])
+                if (  len(playlist_report_data['notices'])
+                    < len(playlist_report_state['notices'])):
+                    raise RuntimeError('Duplicate `notices` entries found for'
+                                      f' playlist "{playlist_name}" under'
+                                       ' "report" in state file '
+                                      f' "{os.path.basename(state_file.name)}":'
+                                      f' {playlist_report_state["notices"]}')
             if 'videos_older_to_newer' in playlist_report_state:
                 playlist_report_data['videos_older_to_newer'] \
                         = playlist_report_state['videos_older_to_newer']
@@ -1191,9 +1198,12 @@ def write_state(state_file, acked_video_ids, report_data):
         playlist_report_state \
                 = {'playlist_url':  playlist_url,
                    'playlist_name': playlist_report_data['playlist_name']}
-        for field in ('notices', 'videos_older_to_newer'):
-            if field in playlist_report_data:
-                playlist_report_state[field] = playlist_report_data[field]
+        if 'notices' in playlist_report_data:
+            playlist_report_state['notices'] \
+                    = list(playlist_report_data['notices'])
+        if 'videos_older_to_newer' in playlist_report_data:
+            playlist_report_state['videos_older_to_newer'] \
+                    = playlist_report_data['videos_older_to_newer']
         return playlist_report_state
     pre_report_state = [{'playlist_url':    playlist_url,
                          'acked_video_ids': ','.join(sorted(playlist_acked_video_ids))}
