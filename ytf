@@ -1635,17 +1635,15 @@ async def main__generate_report__async():
     fh.setLevel(logging.DEBUG)
     class UTCFormatter(logging.Formatter):
         converter = time.gmtime
-    fmtr = UTCFormatter('[%(asctime)s.%(msecs)03dZ]'
-                        ' %(levelname)s: %(name)s: %(message)s',
+    fmtr = UTCFormatter('[%(asctime)s.%(msecs)03dZ] %(levelname)s: %(name)s: %(message)s',
                         datefmt='%Y-%m-%dT%H:%M:%S')
     fh.setFormatter(fmtr)
     root_logger.addHandler(fh)
     print(f'See "{LOG_FILE_NAME}" to monitor progress.')
     logger = logging.getLogger('main__generate_report__async')
-    logger.info(f'Program started as PID {os.getpid()} at'
-                f' {program_start_timestamp_utc}, using config file'
-                f' "{CONFIG_FILE_NAME}", state file "{STATE_FILE_NAME}", and'
-                f' report file "{REPORT_FILE_NAME}".')
+    logger.info(f'Program started as PID {os.getpid()} at {program_start_timestamp_utc}, using'
+                f' config file "{CONFIG_FILE_NAME}", state file "{STATE_FILE_NAME}", and report'
+                f' file "{REPORT_FILE_NAME}".')
 
     # setup signal handling for Windows
     if platform.system() == 'Windows':
@@ -1661,123 +1659,93 @@ async def main__generate_report__async():
                 as (config_file, config_write_proxy_file):
             config_modified = False
             config = read_config(config_file)
-            with ClaimedFile(WriteProxiedFile(REPORT_FILE_NAME,
-                                              encoding='UTF-8')) \
+            with ClaimedFile(WriteProxiedFile(REPORT_FILE_NAME, encoding='UTF-8')) \
                     as (report_file, report_write_proxy_file):
-                (video_ids_acked_before_last_report,
-                 last_report_data) = read_state(state_file)
-                # NOTE: Later, when writing new state, we'll compare it to the
-                #        state we just read, so in both cases below we must
-                #        deep copy anything which will/may get modified.
+                (video_ids_acked_before_last_report, last_report_data) = read_state(state_file)
+                # NOTE: Later, when writing new state, we'll compare it to the state we just read,
+                #        so in both cases below we must deep copy anything which will/may get
+                #        modified.
                 if report_file is None:
                     # No report file exists, which should mean either:
-                    #   * This program is running for the first time (in the
-                    #      current directory), which means there's also no
-                    #      state file yet, so the state object we have now is
-                    #      empty.
-                    #   * The user already viewed and deleted it, so we need to
-                    #      create a new one using the state as it was after
-                    #      that deleted report was generated (which we'll
-                    #      construct by adding the IDs in last report's data to
-                    #      the IDs that the user had acknowledged before the
-                    #      last report was generated).
-                    logger.debug('Report file not found, so set of user-acked'
-                                 ' video IDs = set of video IDs acked before'
-                                 ' last report (if any) + set of video IDs'
-                                 ' used in last report (if any), and new'
-                                 ' report\'s data starts out empty.')
-                    acked_video_ids = (
-                            {} if video_ids_acked_before_last_report is None
-                            else copy.deepcopy(
-                                         video_ids_acked_before_last_report))
+                    #   * This program is running for the first time (in the current directory),
+                    #      which means there's also no state file yet, so the state object we have
+                    #      now is empty.
+                    #   * The user already viewed and deleted it, so we need to create a new one
+                    #      using the state as it was after that deleted report was generated (which
+                    #      we'll construct by adding the IDs in last report's data to the IDs that
+                    #      the user had acknowledged before the last report was generated).
+                    logger.debug('Report file not found, so set of user-acked video IDs = set of'
+                                 ' video IDs acked before last report (if any) + set of video IDs'
+                                 ' used in last report (if any), and new report\'s data starts out'
+                                 ' empty.')
+                    acked_video_ids = ({} if video_ids_acked_before_last_report is None
+                                       else copy.deepcopy(video_ids_acked_before_last_report))
                     if last_report_data is not None:
-                        for (playlist_url,
-                             playlist_report_data) in last_report_data.items():
-                            acked_video_ids.setdefault(playlist_url,
-                                                       set()).update(
-                                    {v['id']
-                                     for v
-                                      in playlist_report_data[
-                                                 'videos_older_to_newer']})
+                        for (playlist_url, playlist_report_data) in last_report_data.items():
+                            if 'videos_older_to_newer' in playlist_report_data:
+                                acked_video_ids.setdefault(playlist_url, set()).update(
+                                        {v['id']
+                                         for v in playlist_report_data['videos_older_to_newer']})
                     new_report_data = {}
                 else:
-                    # A report file already exists, so we need to replace it
-                    #  with a fresh one that includes everything currently in
-                    #  it, plus anything new since.
-                    logger.debug('Report file found, so set of user-acked'
-                                 ' video IDs = set of video IDs acked before'
-                                 ' last report (if any), and new report\'s'
-                                 ' data starts out with last report\'s data.')
-                    acked_video_ids = (
-                            {} if video_ids_acked_before_last_report is None
-                            else video_ids_acked_before_last_report)
-                    new_report_data = (
-                            {} if last_report_data is None
-                            else copy.deepcopy(last_report_data))
+                    # A report file already exists, so we need to replace it with a fresh one that
+                    #  includes everything currently in it, plus anything new since.
+                    logger.debug('Report file found, so set of user-acked video IDs = set of video'
+                                 ' IDs acked before last report (if any), and new report\'s data'
+                                 ' starts out with last report\'s data.')
+                    acked_video_ids = ({} if video_ids_acked_before_last_report is None
+                                       else video_ids_acked_before_last_report)
+                    new_report_data = ({} if last_report_data is None
+                                       else copy.deepcopy(last_report_data))
 
                 # gather info
                 for config__playlist_info in config['playlist_infos']:
                     playlist_url = config__playlist_info['url']
-                    playlist_acked_video_ids \
-                            = acked_video_ids.get(playlist_url, set())
-                    playlist_new_report_data \
-                            = new_report_data.setdefault(playlist_url, {})
+                    playlist_acked_video_ids = acked_video_ids.get(playlist_url, set())
+                    playlist_new_report_data = new_report_data.setdefault(playlist_url, {})
                     playlist_name = config__playlist_info.get('name', None)
 
                     # get playlist data
-                    # NOTE: This calls coroutine, which returns coroutine
-                    #        object that we "await", which adds it to event
-                    #        loop (coroutine starts running) and waits for it
-                    #        to complete.
-                    await get_playlist_report_data__async(
-                                  playlist_new_report_data,
-                                  playlist_acked_video_ids,
-                                  playlist_url,
-                                  playlist_name)
+                    # NOTE: This calls coroutine, which returns coroutine object that we "await",
+                    #        which adds it to event loop (coroutine starts running) and waits for
+                    #        it to complete.
+                    await get_playlist_report_data__async(playlist_new_report_data,
+                                                          playlist_acked_video_ids,
+                                                          playlist_url,
+                                                          playlist_name)
 
-                    if (    playlist_name is None
-                        and 'playlist_name' in playlist_new_report_data):
-                        playlist_name \
-                                = config__playlist_info['name'] \
-                                = playlist_new_report_data['playlist_name']
+                    if playlist_name is None and 'playlist_name' in playlist_new_report_data:
+                        playlist_name = config__playlist_info['name'] \
+                                      = playlist_new_report_data['playlist_name']
                         config_modified = True
                     if not any(field in playlist_new_report_data
-                               for field in ('notices',
-                                             'videos_older_to_newer')):
-                        # NOTE: There are no notices or videos in this
-                        #        playlist's report data, so we must delete its
-                        #        entry (which we must've just recently created
-                        #        when we called `.setdefault(...)` on
-                        #        `new_report_data` above) because the rest of
-                        #        the code assumes that we only have entries for
-                        #        playlists that actually have data to go into
-                        #        the report (i.e. either notices or videos).
+                               for field in ('notices', 'videos_older_to_newer')):
+                        # NOTE: There are no notices or videos in this playlist's report data, so
+                        #        we must delete its entry (which we must've just recently created
+                        #        when we called `.setdefault(...)` on `new_report_data` above)
+                        #        because the rest of the code assumes that we only have entries for
+                        #        playlists that actually have data to go into the report (i.e.
+                        #        either notices or videos).
                         del playlist_new_report_data
                         del new_report_data[playlist_url]
 
                 # write report
-                write_report(report_write_proxy_file,
-                             new_report_data,
-                             program_start_timestamp_utc)
-                # NOTE: If write_report or closing of report file's `with`
-                #        block fails for any reason, exception is raised before
-                #        we write actual report file, so we'd also skip logic
-                #        below for updating playlist names in config file (no
-                #        big deal) and writing updated state file, thus in the
-                #        end none of the files get written and it's as if
-                #        program just never ran, which is exactly the
+                write_report(report_write_proxy_file, new_report_data, program_start_timestamp_utc)
+                # NOTE: If write_report or closing of report file's `with` block fails for any
+                #        reason, exception is raised before we write actual report file, so we'd
+                #        also skip logic below for updating playlist names in config file (no big
+                #        deal) and writing updated state file, thus in the end none of the files
+                #        get written and it's as if program just never ran, which is exactly the
                 #        transactional behavior we want.
-                #       If report existed at start, but was removed by time of
-                #        writing (for instance because user had opened report
-                #        without using this program's "view" mode, watched
-                #        videos, then deleted report, all while this program
-                #        was running) then newly written report will contain
-                #        videos user already saw (because report had existed at
-                #        the time this program started). While this may be
-                #        annoying, it is at least better than alternative of
-                #        erring in favor of skipping videos user may not have
-                #        seen. To prevent this from happening, user should only
-                #        view/delete report via this program's "view" mode.
+                #       If report existed at start, but was removed by time of writing (for
+                #        instance because user had opened report without using this program's
+                #        "view" mode, watched videos, then deleted report, all while this program
+                #        was running) then newly written report will contain videos user already
+                #        saw (because report had existed at the time this program started). While
+                #        this may be annoying, it is at least better than alternative of erring in
+                #        favor of skipping videos user may not have seen. To prevent this from
+                #        happening, user should only view/delete report via this program's "view"
+                #        mode.
 
             # write config, if it's been modified
             if not config_modified:
