@@ -1514,7 +1514,7 @@ def write_report(report_file, report_data, report_start_timestamp):
         # NOTE: We use CSS `padding-left` below instead of `text-indent`
         #        because the latter only indents the first contained line and
         #        we want to indent all the lines together.
-        print(f'<h2><a href="{playlist_url}">{html.escape(playlist_display_text)}</a></h2>\n'
+        print(f'<h2><a href="{playlist_url}" target="_blank" rel="noopener noreferrer">{html.escape(playlist_display_text)}</a></h2>\n'
                '    <div style="padding-left: 50px;">\n'
                '    New videos, older to newer:',
               file=report_file)
@@ -1539,7 +1539,7 @@ def write_report(report_file, report_data, report_start_timestamp):
                   f'          title="{html_safe_description}"')
             else:
                 tooltip_html = ''
-            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}"{tooltip_html}>\n'
+            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}" target="_blank" rel="noopener noreferrer"{tooltip_html}>\n'
                   f'           {html_safe_title}</a><br/>\n'
                   f'       <img class="thumbnail-{video["id"]}"\n'
                   f'            src="{video["thumbnail"]}"\n'
