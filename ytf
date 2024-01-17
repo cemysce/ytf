@@ -27,6 +27,7 @@ import string
 import subprocess
 import sys
 import time
+import urllib.parse
 import webbrowser
 
 assert sys.version_info >= (3, 8)
@@ -1116,17 +1117,17 @@ async def streamreader_to_lines(sr, line_cb, *, encoding='UTF-8'):
 
 def read_config(config_file):
     config = json.load(config_file)
-    duplicate_urls = {playlist_url
-                      for playlist_url, count
-                       in collections.Counter(
-                                  playlist_info['url']
-                                  for playlist_info
-                                   in config['playlist_infos']).items()
+    duplicate_playlist_urls = {playlist_url
+                               for playlist_url, count
+                                in collections.Counter(
+                                           playlist_info['url']
+                                           for playlist_info
+                                            in config['playlist_infos']).items()
                        if count > 1}
-    if len(duplicate_urls) > 0:
+    if len(duplicate_playlist_urls) > 0:
         raise RuntimeError('Duplicate `url` values found in config file'
                           f' "{os.path.basename(config_file.name)}":'
-                          f' {", ".join(duplicate_urls)}')
+                          f' {", ".join(duplicate_playlist_urls)}')
     return config
 
 def read_state(state_file):
@@ -1478,7 +1479,7 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
 
     return playlist_name
 
-def write_report(report_file, report_data, report_start_timestamp):
+def write_report(report_file, report_data, playlists_addl_links, report_start_timestamp):
     logger = logging.getLogger('write_report')
     logger.info('Writing report...')
     print('<html>\n'
@@ -1539,8 +1540,22 @@ def write_report(report_file, report_data, report_start_timestamp):
                   f'          title="{html_safe_description}"')
             else:
                 tooltip_html = ''
+
+            addl_links_htmls = []
+            text_template_params = {'title':      html_safe_title}
+            url_template_params  = {'title':      urllib.parse.quote(video['title']),
+                                    'title_plus': urllib.parse.quote_plus(video['title'])}
+            for addl_link in playlists_addl_links[playlist_url]:
+                same_line_as_prev = addl_link.get('same_line_as_prev', False)
+                addl_link_text    = addl_link['text_template'].format(**text_template_params)
+                addl_link_url     = addl_link['url_template'].format(**url_template_params)
+                addl_links_htmls.append(f'{" &bull;" if same_line_as_prev else "<br/>"}\n')
+                addl_links_htmls.append(
+                  f'       <a href="{addl_link_url}" target="_blank" rel="noopener noreferrer">{addl_link_text}</a>')
+
             print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}" target="_blank" rel="noopener noreferrer"{tooltip_html}>\n'
-                  f'           {html_safe_title}</a><br/>\n'
+                  f'           {html_safe_title}</a>'
+                         f'{"".join(addl_links_htmls)}<br/>\n'
                   f'       <img class="thumbnail-{video["id"]}"\n'
                   f'            src="{video["thumbnail"]}"\n'
                    '            style="cursor:pointer;"\n'
@@ -1699,11 +1714,16 @@ async def main__generate_report__async():
                                        else copy.deepcopy(last_report_data))
 
                 # gather info
+                playlists_addl_links = {}
                 for config__playlist_info in config['playlist_infos']:
-                    playlist_url = config__playlist_info['url']
+                    playlist_url             = config__playlist_info['url']
                     playlist_acked_video_ids = acked_video_ids.get(playlist_url, set())
                     playlist_new_report_data = new_report_data.setdefault(playlist_url, {})
-                    playlist_name = config__playlist_info.get('name', None)
+                    playlist_name            = config__playlist_info.get('name', None)
+                    playlists_addl_links[playlist_url] \
+                                             = copy.deepcopy(config__playlist_info.get(
+                                                                     'additional_links_per_video',
+                                                                     []))
 
                     # get playlist data
                     # NOTE: This calls coroutine, which returns coroutine object that we "await",
@@ -1730,7 +1750,10 @@ async def main__generate_report__async():
                         del new_report_data[playlist_url]
 
                 # write report
-                write_report(report_write_proxy_file, new_report_data, program_start_timestamp_utc)
+                write_report(report_write_proxy_file,
+                             new_report_data,
+                             playlists_addl_links,
+                             program_start_timestamp_utc)
                 # NOTE: If write_report or closing of report file's `with` block fails for any
                 #        reason, exception is raised before we write actual report file, so we'd
                 #        also skip logic below for updating playlist names in config file (no big
