@@ -12,6 +12,7 @@ import abc
 import asyncio
 import codecs
 import collections
+import contextlib
 import copy
 import datetime
 import html
@@ -26,6 +27,7 @@ import signal
 import string
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import webbrowser
@@ -1233,6 +1235,43 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
                                           playlist_name=None):
     logger = logging.getLogger('get_playlist_report_data__async')
 
+    # init structure to hold videos listed by subprocess, and define callback
+    #  function to handle receiving info about each listed video
+    videos_older_to_newer = collections.deque()
+    def handle_video(video):
+        nonlocal playlist_name
+        if playlist_name is None:
+            # this playlist property is exposed as a field in each playlist
+            #  entry's data object (see comment about --dump-json)
+            playlist_name = video['playlist_title']
+        if video['id'] in already_known_video_ids:
+            logger.info(f'Encountered already-known video ID {video["id"]} in'
+                         ' playlist, attempting to abort playlist download'
+                        f' subprocess early (yt-dlp PID {subproc.pid}).')
+            if platform.system() == 'Windows':
+                # See above comments for why we use CTRL_BREAK_EVENT instead of
+                #  other process termination techniques.
+                subproc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                subproc.terminate()
+            logger.info('Terminated playlist download subprocess (yt-dlp PID'
+                       f' {subproc.pid}).')
+            return False
+        vobj = {'id':    video['id'],
+                'title': video['title']}
+        video_description = video.get('description', None)
+        if video_description is not None:
+            vobj['description'] = video_description
+        video_thumbnails = video.get('thumbnails', None)
+        if isinstance(video_thumbnails, list) and len(video_thumbnails) > 0:
+            vobj['thumbnail'] = video_thumbnails[-1]['url']
+        videos_older_to_newer.appendleft(vobj)
+        return True
+
+    # define callback function to handle logging each line printed to stderr
+    def handle_stderr_line(line):
+        logger.info(f'[yt-dlp({subproc.pid})] {line}')
+
     # init playlist display text
     if playlist_name is None:
         playlist_display_text = f'{playlist_url}'
@@ -1332,86 +1371,73 @@ async def get_playlist_report_data__async(playlist_report_data, # input/output p
         subprocess_kwargs['creationflags'] \
                 = subprocess.CREATE_NEW_PROCESS_GROUP
 
-    # start playlist download subprocess, but don't yet wait for it to complete
-    # NOTE: This calls coroutine, which returns coroutine object that we
-    #        "await", which adds it to event loop (coroutine starts running)
-    #        and waits for it to "complete" (creates and starts subprocess,
-    #        returns Process object immediately for caller to interact with
-    #        running subprocess, does not wait for subprocess to complete).
-    subproc = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE, # capture stdout
-                            stderr=asyncio.subprocess.PIPE, # capture stderr
-                            **subprocess_kwargs)
-    logger.info(f'Downloading playlist at {playlist_display_text}'
-                 ' (may take several minutes if many videos), started playlist'
-                f' download subprocess (yt-dlp PID {subproc.pid}).')
+    # use unique temporary directory on Windows for duration of yt-dlp process
+    # NOTE: This is to address an issue with pyinstaller (the Windows version
+    #        of yt-dlp is packaged as a self-extracting pyinstaller package)
+    #        where it seems to step over itself in cleaning up a pyinstaller
+    #        temporary directory while another yt-dlp process is still using
+    #        it, resulting in errors that the Python DLL file is being used by
+    #        another process. Hopefully forcing each yt-dlp process to use a
+    #        distinct base temporary directory will avoid this clobbering.
+    with (tempfile.TemporaryDirectory() if platform.system() == 'Windows'
+          else contextlib.nullcontext()) as tmpdir:
+        if tmpdir is not None:
+            override_env = os.environ.copy()
+            for ev in ('TEMP', 'TMP', 'TMPDIR'):
+                if ev in override_env:
+                    override_env[ev] = tmpdir
+            subprocess_kwargs['env'] = override_env
 
-    # init structure to hold videos listed by subprocess, and define callback
-    #  function to handle receiving info about each listed video
-    videos_older_to_newer = collections.deque()
-    def handle_video(video):
-        nonlocal playlist_name
-        if playlist_name is None:
-            # this playlist property is exposed as a field in each playlist
-            #  entry's data object (see comment about --dump-json)
-            playlist_name = video['playlist_title']
-        if video['id'] in already_known_video_ids:
-            logger.info(f'Encountered already-known video ID {video["id"]} in'
-                         ' playlist, attempting to abort playlist download'
-                        f' subprocess early (yt-dlp PID {subproc.pid}).')
-            if platform.system() == 'Windows':
-                # See above comments for why we use CTRL_BREAK_EVENT instead of
-                #  other process termination techniques.
-                subproc.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                subproc.terminate()
-            logger.info('Terminated playlist download subprocess (yt-dlp PID'
-                       f' {subproc.pid}).')
-            return False
-        vobj = {'id':    video['id'],
-                'title': video['title']}
-        video_description = video.get('description', None)
-        if video_description is not None:
-            vobj['description'] = video_description
-        video_thumbnails = video.get('thumbnails', None)
-        if isinstance(video_thumbnails, list) and len(video_thumbnails) > 0:
-            vobj['thumbnail'] = video_thumbnails[-1]['url']
-        videos_older_to_newer.appendleft(vobj)
-        return True
+        # start playlist download subprocess, but don't yet wait for it to
+        #  complete
+        # NOTE: This calls coroutine, which returns coroutine object that we
+        #        "await", which adds it to event loop (coroutine starts
+        #        running) and waits for it to "complete" (creates and starts
+        #        subprocess, returns Process object immediately for caller to
+        #        interact with running subprocess, does not wait for subprocess
+        #        to complete).
+        subproc = await asyncio.create_subprocess_exec(
+                                *cmd,
+                                stdin=asyncio.subprocess.DEVNULL,
+                                stdout=asyncio.subprocess.PIPE, # capture stdout
+                                stderr=asyncio.subprocess.PIPE, # capture stderr
+                                **subprocess_kwargs)
+        logger.info(f'Downloading playlist at {playlist_display_text}'
+                     ' (may take several minutes if many videos), started'
+                     ' playlist download subprocess (yt-dlp PID'
+                    f' {subproc.pid}).')
+        if tmpdir is not None:
+            logger.debug(f'Temporary directory is overridden to "{tmpdir}" for'
+                         f' yt-dlp PID {subproc.pid}.')
 
-    # define callback function to handle logging each line printed to stderr
-    def handle_stderr_line(line):
-        logger.info(f'[yt-dlp({subproc.pid})] {line}')
+        # in "parallel", read playlist download subprocess's stdout until end
+        #  or until already-known video is encountered, and stderr until end
+        # NOTE: This calls coroutine, which returns coroutine object that we
+        #        "await", which adds it to event loop (coroutine starts
+        #        running) and waits for it to complete (it's passed two
+        #        coroutine objects as arguments (i.e. results of calling the
+        #        two "streamreader_..." coroutines), which it converts to tasks
+        #        and schedules to be run in "parallel", then waits for the
+        #        return values of, which it then returns to us here (in same
+        #        order as coroutines were passed), of which we're only
+        #        concerned with the first).
+        subprocess_not_aborted \
+                = (await asyncio.gather(streamreader_to_json_objs(
+                                                subproc.stdout,
+                                                handle_video),
+                                        streamreader_to_lines(
+                                                subproc.stderr,
+                                                handle_stderr_line)))[0]
 
-    # in "parallel", read playlist download subprocess's stdout until end or
-    #  until already-known video is encountered, and stderr until end
-    # NOTE: This calls coroutine, which returns coroutine object that we
-    #        "await", which adds it to event loop (coroutine starts running)
-    #        and waits for it to complete (it's passed two coroutine objects as
-    #        arguments (i.e. results of calling the two "streamreader_..."
-    #        coroutines), which it converts to tasks and schedules to be run in
-    #        "parallel", then waits for the return values of, which it then
-    #        returns to us here (in same order as coroutines were passed), of
-    #        which we're only concerned with the first).
-    subprocess_not_aborted \
-            = (await asyncio.gather(streamreader_to_json_objs(
-                                            subproc.stdout,
-                                            handle_video),
-                                    streamreader_to_lines(
-                                            subproc.stderr,
-                                            handle_stderr_line)))[0]
+        logger.info('Waiting for playlist download subprocess (yt-dlp PID'
+                  f' {subproc.pid})...')
 
-    logger.info('Waiting for playlist download subprocess (yt-dlp PID'
-              f' {subproc.pid})...')
-
-    # wait for playlist download subprocess to complete (if not already)
-    # NOTE: This calls coroutine, which returns coroutine object that we
-    #        "await", which adds it to event loop (coroutine starts running)
-    #        and waits for it to complete (i.e. waits for subprocess we started
-    #        above to complete).
-    await subproc.wait()
+        # wait for playlist download subprocess to complete (if not already)
+        # NOTE: This calls coroutine, which returns coroutine object that we
+        #        "await", which adds it to event loop (coroutine starts
+        #        running) and waits for it to complete (i.e. waits for
+        #        subprocess we started above to complete).
+        await subproc.wait()
 
     # check subprocess's exit status (but only if we had let it run to
     #  completion; exit status is irrelevant if we had killed subprocess,
