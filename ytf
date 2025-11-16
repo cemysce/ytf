@@ -15,7 +15,10 @@ import collections
 import contextlib
 import copy
 import datetime
+import functools
 import html
+import http
+import http.server
 import inspect
 import io
 import json
@@ -23,11 +26,13 @@ import logging
 import os
 import pathlib
 import platform
+import shutil
 import signal
 import string
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import webbrowser
@@ -41,7 +46,13 @@ Usage: {program} [generate|view]
   generate  Generates/regenerates report HTML file of new videos on followed
              playlists (logs to log file).
 
-  view      Opens report HTML file in default web browser (logs to console).
+  view      Starts a local webserver to host report HTML file, and opens it in
+             default web browser (logs to console).
+
+  viewfile  Opens report HTML file in default web browser (logs to console).
+             Note that YouTube may block loading embedded videos when viewed
+             this way, since web browsers tend to omit the Referer header when
+             the originating URL is a local file (i.e. file://).
 
 Both modes lock report file to prevent concurrent use by other {program} instances.
 '''
@@ -77,6 +88,47 @@ class LoggerMixin:
             #  documentation)
             del calling_frame
             del current_frame
+
+class HTMLFileHTTPRequestHandler(http.server.BaseHTTPRequestHandler, LoggerMixin):
+    '''Even simpler version of http.server.SimpleHTTPRequestHandler.'''
+    server_version = 'ytf/0.1'
+    def __init__(self, *args, html_file_path, **kwargs):
+        self._html_file_path = os.fspath(html_file_path)
+        LoggerMixin.__init__(self)
+        super().__init__(*args, **kwargs)
+    def do_GET(self):
+        f = self.send_head()
+        if f:
+            try:
+                shutil.copyfileobj(f, self.wfile)
+            finally:
+                f.close()
+    def do_HEAD(self):
+        f = self.send_head()
+        if f:
+            f.close()
+    def send_head(self):
+        try:
+            f = open(self._html_file_path, 'rb')
+        except OSError:
+            self.send_error(http.HTTPStatus.NOT_FOUND, 'File not found')
+            return None
+        try:
+            fs = os.fstat(f.fileno())
+            self.send_response(http.HTTPStatus.OK)
+            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-Length', str(fs[6]))
+            self.send_header('Last-Modified',
+                             self.date_time_string(fs.st_mtime))
+            self.end_headers()
+            return f
+        except:
+            f.close()
+            raise
+    def log_error(self, fmt, *args):
+        self._logger().debug(fmt % args)
+    def log_message(self, fmt, *args):
+        self._logger().debug(fmt % args)
 
 ###############################################################################
 ## GENERIC SAFE FILE-HANDLING UTILITY FUNCTIONS: ##############################
@@ -942,6 +994,27 @@ interruptible_getch_from_tty = {
 class NonTTYException(Exception):
     pass
 
+def any_key_prompt(prompt):
+    '''Prompt user before continuing by any keypress.
+
+    Arguments:
+        prompt (str)    Text to display to prompt user for input.
+
+    Raises:
+        NonTTYException     stdin or stdout is not a TTY. Text of exception
+                             will specify which.
+    '''
+    if not os.isatty(sys.stdin.fileno()):
+        raise NonTTYException('stdin is not a TTY')
+    if not os.isatty(sys.stdout.fileno()):
+        raise NonTTYException('stdout is not a TTY')
+    print(prompt, flush=True)
+    while True:
+        # must use something interruptible, particularly on Windows, so that
+        #  signals can interrupt main thread
+        interruptible_getch_from_tty()
+        break
+
 def confirmation_prompt(prompt,
                         *,
                         negative_feedback=False,
@@ -1613,10 +1686,14 @@ def write_report(report_file, report_data, playlists_addl_links, report_start_ti
 
 def use_report(report_file_name,
                *,
+               use_webserver=False,
                launch=False,
                prompt_to_delete=False,
                delete=None):
     logger = logging.getLogger('use_report')
+    if use_webserver and not launch:
+        raise ValueError('cannot have use_webserver be True while launch is'
+                         ' False')
     if delete is None:
         delete = prompt_to_delete
     elif prompt_to_delete and not delete:
@@ -1627,33 +1704,57 @@ def use_report(report_file_name,
                      ' do.')
         return
     with ClaimedFile(lock_file_name=f'{report_file_name}.lck'):
-        if launch:
-            logger.info(f'Launching report file "{report_file_name}" in web'
-                         ' browser.')
-            file_url = pathlib.Path(report_file_name).absolute().as_uri()
+        with (http.server.ThreadingHTTPServer(
+                      ('localhost', 0), # 0 makes OS auto-select available port
+                      functools.partial(HTMLFileHTTPRequestHandler,
+                                        html_file_path=report_file_name))
+              if use_webserver else contextlib.nullcontext()) as httpd:
+            if launch:
+                if httpd is None:
+                    logger.info(f'Launching report file "{report_file_name}" in'
+                                 ' web browser.')
+                    url = pathlib.Path(report_file_name).absolute().as_uri()
+                else:
+                    logger.info('Starting webserver to host report file'
+                               f' "{report_file_name}".')
+                    logger.info('Launching local report website in web browser.')
+                    url = f'http://{"%s:%d" % httpd.server_address}'
+                    thread = threading.Thread(target=httpd.serve_forever)
+                    thread.start()
 
-            # webbrowser module may produce output, and provides no direct
-            #  means of suppressing it, so we just redirect stdout+stderr to
-            #  /dev/null (or Windows' equivalent) for duration of open_new_tab
-            with RedirectStdIO(sys.stdout, os.devnull), \
-                 RedirectStdIO(sys.stderr, os.devnull):
-                webbrowser.open_new_tab(file_url)
+                # webbrowser module may produce output, and provides no direct
+                #  means of suppressing it, so we just redirect stdout+stderr
+                #  to /dev/null (or Windows' equivalent) for duration of
+                #  open_new_tab
+                with RedirectStdIO(sys.stdout, os.devnull), \
+                     RedirectStdIO(sys.stderr, os.devnull):
+                    webbrowser.open_new_tab(url)
 
-        if prompt_to_delete:
-            if not confirmation_prompt(
-                           f'Delete report file "{report_file_name}"? ',
-                           negative_feedback=('Response not recognized, must'
-                                              ' be "y" or "n".')):
-                return
-        if delete:
-            logger.info(f'Deleting report file "{report_file_name}". Videos'
-                         ' listed in it will not be reported again.')
-            os.remove(report_file_name)
-        else:
-            logger.info(f'Keeping report file "{report_file_name}". If it is'
-                         ' still present next time this is run in "generate"'
-                         ' mode, it will be replaced with a report file'
-                         ' listing the same videos plus any newer ones.')
+            if prompt_to_delete:
+                delete = confirmation_prompt(
+                                 f'Delete report file "{report_file_name}"? ',
+                                 negative_feedback=('Response not recognized,'
+                                                    ' must be "y" or "n".'))
+            if httpd is not None:
+                if not prompt_to_delete:
+                    # only prompt to stop webserver if we didn't already prompt
+                    #  to delete report file, since there's little reason to
+                    #  prompt twice
+                    any_key_prompt('Press any key to stop webserver.')
+                logger.info('Stopping webserver.')
+                httpd.shutdown()
+                thread.join()
+            if delete:
+                logger.info(f'Deleting report file "{report_file_name}".'
+                             ' Videos listed in it will not be reported'
+                             ' again.')
+                os.remove(report_file_name)
+            else:
+                logger.info(f'Keeping report file "{report_file_name}". If it'
+                             ' is still present next time this is run in'
+                             ' "generate" mode, it will be replaced with a'
+                             ' report file listing the same videos plus any'
+                             ' newer ones.')
 
 def main__usage():
     print(USAGE.format(program=os.path.basename(sys.argv[0])))
@@ -1826,7 +1927,7 @@ def main__generate_report():
     #        it (coroutine starts running) and waits for it to complete.
     asyncio.run(main__generate_report__async())
 
-def main__view_report():
+def main__view_report(*, use_webserver):
     # setup logging
     logging.basicConfig(stream=sys.stdout,
                         format='%(levelname)s: %(name)s: %(message)s',
@@ -1840,7 +1941,10 @@ def main__view_report():
         windows_setup_graceful_exit_for_python_unhandled_control_signals()
 
     # open report
-    use_report(REPORT_FILE_NAME, launch=True, prompt_to_delete=True)
+    use_report(REPORT_FILE_NAME,
+               use_webserver=use_webserver,
+               launch=True,
+               prompt_to_delete=True)
 
 def main():
     args = sys.argv[1:]
@@ -1849,7 +1953,10 @@ def main():
             return main__usage()
         return {
             'generate': main__generate_report,
-            'view':     main__view_report
+            'view':     functools.partial(main__view_report,
+                                          use_webserver=True),
+            'viewfile': functools.partial(main__view_report,
+                                          use_webserver=False)
         }.get(args[0], main__usage)()
     except KeyboardInterrupt:
         print('\nUser interrupted program, will now exit.', file=sys.stderr)
