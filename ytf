@@ -1676,13 +1676,24 @@ def write_report(report_file, report_data, playlists_addl_links, report_start_ti
                 addl_links_htmls.append(
                   f'       <a href="{addl_link_url}" target="_blank" rel="noopener noreferrer">{addl_link_text}</a>')
 
-            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}" target="_blank" rel="noopener noreferrer"{tooltip_html}>\n'
-                  f'           {html_safe_title}</a>'
-                         f'{"".join(addl_links_htmls)}<br/>\n'
+            if 'thumbnail' in video:
+                thumbnail_html = (
                   f'       <img class="thumbnail-{video["id"]}"\n'
                   f'            src="{video["thumbnail"]}"\n'
                    '            style="cursor:pointer;"\n'
-                  f'            onclick="showEmbed(this.getAttribute(\'class\'));" /><br class="thumbnail-{video["id"]}"/>\n'
+                  f'            onclick="showEmbed(this.getAttribute(\'class\'));" /><br class="thumbnail-{video["id"]}"/>'
+                )
+            else:
+                # can't use <div> below because that's invalid inside a <p> block
+                thumbnail_html = (
+                  f'       <span class="thumbnail-{video["id"]}"\n'
+                   '             style="cursor:pointer; background-color:lightgrey;"\n'
+                  f'             onclick="showEmbed(this.getAttribute(\'class\'));">(no thumbnail)</span><br class="thumbnail-{video["id"]}"/>'
+                )
+            print(f'    <p><a href="https://www.youtube.com/watch?v={video["id"]}" target="_blank" rel="noopener noreferrer"{tooltip_html}>\n'
+                  f'           {html_safe_title}</a>'
+                         f'{"".join(addl_links_htmls)}<br/>\n'
+                         f'{thumbnail_html}\n'
                   f'       <iframe id="embed-{video["id"]}"\n'
                    '               style="display:none;"\n'
                    '               width="480"\n'
